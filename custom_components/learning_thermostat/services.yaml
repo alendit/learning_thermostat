@@ -1,0 +1,29 @@
+reset_learning:
+  name: Reset learning
+  description: Reset learning optimizer state for this thermostat.
+  target:
+    entity:
+      integration: learning_thermostat
+  fields:
+    preserve_history:
+      name: Preserve history
+      description: Keep prior room, outdoor, and on/off history when resetting.
+      required: false
+      default: true
+      selector:
+        boolean:
+
+trigger_tick:
+  name: Trigger tick
+  description: Trigger an immediate learning control cycle.
+  target:
+    entity:
+      integration: learning_thermostat
+  fields:
+    force:
+      name: Force tick
+      description: Bypass the normal minimum cycle interval check.
+      required: false
+      default: false
+      selector:
+        boolean:

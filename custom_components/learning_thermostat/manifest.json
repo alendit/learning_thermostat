@@ -1,0 +1,13 @@
+{
+  "domain": "learning_thermostat",
+  "name": "Learning Thermostat",
+  "codeowners": ["@alendit"],
+  "config_flow": true,
+  "documentation": "https://github.com/alendit/learning_thermostat",
+  "integration_type": "device",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/alendit/learning_thermostat/issues",
+  "quality_scale": "bronze",
+  "requirements": ["numpy>=2.2.0"],
+  "version": "0.1.0"
+}
