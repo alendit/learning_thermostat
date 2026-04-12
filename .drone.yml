@@ -1,0 +1,73 @@
+kind: pipeline
+type: docker
+name: default
+
+platform:
+  os: linux
+  arch: arm64
+
+trigger:
+  event:
+    - push
+    - tag
+    - pull_request
+    - custom
+    - cron
+
+steps:
+  - name: bootstrap-check
+    image: alpine:3.20
+    commands:
+      - apk add --no-cache bash jq zip
+      - bash scripts/bootstrap-check.sh
+
+  - name: test-home-assistant
+    image: python:3.13-slim
+    commands:
+      - apt-get update
+      - apt-get install -y build-essential
+      - pip install uv
+      - uv sync --extra dev --no-install-project
+      - .venv/bin/black --check custom_components tests scripts
+      - .venv/bin/python -m pytest -q
+    when:
+      event:
+        - push
+        - tag
+        - pull_request
+        - custom
+        - cron
+
+  - name: deploy-home-assistant
+    image: alpine:3.20
+    environment:
+      HASS_SERVER:
+        from_secret: hass_server
+      HASS_TOKEN:
+        from_secret: hass_token
+    commands:
+      - apk add --no-cache bash curl
+      - bash scripts/deploy-home-assistant.sh
+    volumes:
+      - name: ha-config
+        path: /ha-config
+    when:
+      event:
+        - push
+        - custom
+      branch:
+        - main
+
+  - name: package-components
+    image: alpine:3.20
+    commands:
+      - apk add --no-cache bash jq zip
+      - bash scripts/package-components.sh
+    when:
+      event:
+        - tag
+
+volumes:
+  - name: ha-config
+    host:
+      path: /data/homeassistant/haconfig
