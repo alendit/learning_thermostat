@@ -105,7 +105,10 @@ def _schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
                 CONF_UNDERLYING_ENTITY_IDS,
                 default=defaults.get(CONF_UNDERLYING_ENTITY_IDS, []),
             ): selector.EntitySelector(
-                selector.EntitySelectorConfig(domain=["switch"], multiple=True)
+                selector.EntitySelectorConfig(
+                    domain=["switch", "input_boolean"],
+                    multiple=True,
+                )
             ),
             vol.Required(
                 CONF_TEMPERATURE_SENSOR_ENTITY_ID,
@@ -211,7 +214,7 @@ def _schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
                 selector.NumberSelectorConfig(
                     min=0,
                     max=1,
-                    step=0.0005,
+                    step=0.001,
                     mode=selector.NumberSelectorMode.BOX,
                 )
             ),

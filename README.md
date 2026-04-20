@@ -25,11 +25,19 @@ It intentionally does not include translation support, inverse switch behavior,
 custom switch command strings, switch keep-alive logic, or staggered
 multi-switch activation.
 
+Underlying on/off control entities may be either Home Assistant `switch`
+entities or `input_boolean` helpers, as long as they support standard
+`turn_on` / `turn_off` services.
+
 ## Migration
 
 The migration utility reads `learning_state` and `learning_last_tick` from an
 existing `versatile_thermostat` learning thermostat entity over the Home
 Assistant REST API and writes them into this integration's storage file.
+
+This is enough to preserve learned model state, but it does not migrate the
+broader `versatile_thermostat` feature surface such as presets, safety/lock
+features, or automations that still point at the old entity IDs.
 
 Example:
 

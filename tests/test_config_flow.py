@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from homeassistant.data_entry_flow import FlowResultType
 import pytest
+from homeassistant.helpers import selector
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.learning_thermostat.config_flow import _schema
 from custom_components.learning_thermostat.const import (
     CONF_CYCLE_MINUTES,
     CONF_LEARNING_ENERGY,
@@ -59,6 +61,32 @@ async def test_user_flow_creates_entry(hass) -> None:
         "switch.floor_a",
         "switch.floor_b",
     ]
+
+
+async def test_user_flow_without_input_shows_form(hass) -> None:
+    """Opening the config flow should render the form."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": "user"},
+    )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "user"
+
+
+async def test_schema_accepts_input_boolean_underlyings() -> None:
+    """The form should allow switch-like input booleans as actuators."""
+    schema = _schema()
+
+    field = next(
+        key
+        for key in schema.schema
+        if getattr(key, "schema", None) == CONF_UNDERLYING_ENTITY_IDS
+    )
+    entity_selector = schema.schema[field]
+
+    assert isinstance(entity_selector, selector.EntitySelector)
+    assert entity_selector.config["domain"] == ["switch", "input_boolean"]
 
 
 async def test_user_flow_rejects_duplicate_switch_set(hass) -> None:
