@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, TypedDict
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
@@ -16,12 +16,21 @@ STORAGE_KEY = f"{DOMAIN}_state"
 STORAGE_DATA_KEY = "entries"
 
 
+class LearningEntryPayload(TypedDict):
+    """Stored state for one thermostat entry."""
+
+    learning_state: dict[str, Any] | None
+    learning_last_tick: str | None
+    current_temperature: float | None
+    outside_temperature: float | None
+
+
 def build_entry_payload(
     learning_state: dict[str, Any] | None,
     learning_last_tick: str | None,
     current_temperature: float | None,
     outside_temperature: float | None,
-) -> dict[str, Any]:
+) -> LearningEntryPayload:
     """Build one stored entry payload."""
     return {
         "learning_state": learning_state,
@@ -43,7 +52,7 @@ class LearningStateStore:
         )
         self._lock = asyncio.Lock()
 
-    async def async_get_entry(self, entry_id: str) -> dict[str, Any] | None:
+    async def async_get_entry(self, entry_id: str) -> LearningEntryPayload | None:
         """Return one stored entry."""
         async with self._lock:
             data = await self._store.async_load() or {STORAGE_DATA_KEY: {}}
@@ -51,9 +60,11 @@ class LearningStateStore:
             if not isinstance(entries, dict):
                 return None
             entry = entries.get(entry_id)
-            return dict(entry) if isinstance(entry, dict) else None
+            return LearningEntryPayload(**entry) if isinstance(entry, dict) else None
 
-    async def async_save_entry(self, entry_id: str, payload: dict[str, Any]) -> None:
+    async def async_save_entry(
+        self, entry_id: str, payload: LearningEntryPayload
+    ) -> None:
         """Persist one entry payload."""
         async with self._lock:
             data = await self._store.async_load() or {STORAGE_DATA_KEY: {}}

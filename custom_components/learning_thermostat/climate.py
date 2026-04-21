@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import logging
 from datetime import timedelta
 from typing import Any
+
+import voluptuous as vol
 
 from homeassistant.components.climate import ClimateEntity
 from homeassistant.components.climate.const import (
@@ -28,38 +29,28 @@ from homeassistant.core import (
     State,
     callback,
 )
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import service as hass_service
+from homeassistant.helpers.entity_platform import (
+    AddEntitiesCallback,
+    async_get_current_platform,
+)
 from homeassistant.helpers.event import (
     async_track_state_change_event,
     async_track_time_interval,
 )
 from homeassistant.helpers.restore_state import RestoreEntity
-from homeassistant.util import dt as dt_util
 
 from .const import (
-    CONF_CYCLE_MINUTES,
-    CONF_FORECAST_ENTITY_ID,
-    CONF_LEARNING_ENERGY,
-    CONF_LEARNING_ERROR_DECAY,
-    CONF_LEARNING_HISTORY_STEPS,
-    CONF_LEARNING_L2_REG,
-    CONF_LEARNING_LOOKAHEAD_STEPS,
-    CONF_LEARNING_RATE,
-    CONF_MAX_TEMPERATURE,
-    CONF_MIN_TEMPERATURE,
-    CONF_OUTDOOR_TEMPERATURE_SENSOR_ENTITY_ID,
-    CONF_TARGET_TEMPERATURE,
-    CONF_TEMPERATURE_SENSOR_ENTITY_ID,
-    CONF_UNDERLYING_ENTITY_IDS,
-    DATA_ENTITIES,
+    DATA_SERVICES_REGISTERED,
     DATA_STORAGE,
     DOMAIN,
     NAME,
+    SERVICE_RESET_LEARNING,
+    SERVICE_TRIGGER_TICK,
 )
-from .optimizer import DEFAULT_LEARNING_SWITCH_CONFIG, LearningSwitchOptimizer
-from .storage import LearningStateStore, build_entry_payload
-
-_LOGGER = logging.getLogger(__name__)
+from .controller import ThermostatConfig, ThermostatController
+from .storage import LearningEntryPayload, LearningStateStore
 
 try:
     from homeassistant.components.weather import (
@@ -75,6 +66,7 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the learning thermostat climate entity."""
+    _async_ensure_entity_services_registered(hass)
     entity = LearningThermostatEntity(
         hass,
         entry,
@@ -100,36 +92,11 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
         self._entry = entry
         self._store = store
         self._name = entry.title or entry.data.get("name", NAME)
-        self._switch_entity_ids = list(entry.data[CONF_UNDERLYING_ENTITY_IDS])
-        self._temperature_sensor_entity_id = entry.data[
-            CONF_TEMPERATURE_SENSOR_ENTITY_ID
-        ]
-        self._outdoor_sensor_entity_id = entry.data.get(
-            CONF_OUTDOOR_TEMPERATURE_SENSOR_ENTITY_ID
+        self._config = ThermostatConfig.from_mapping(
+            name=self._name,
+            data=dict(entry.data),
         )
-        self._forecast_entity_id = entry.data.get(CONF_FORECAST_ENTITY_ID)
-        self._cycle_minutes = int(entry.data[CONF_CYCLE_MINUTES])
-        self._min_temp = float(entry.data[CONF_MIN_TEMPERATURE])
-        self._max_temp = float(entry.data[CONF_MAX_TEMPERATURE])
-        self._target_temperature = float(entry.data[CONF_TARGET_TEMPERATURE])
-        self._lookahead_steps = int(entry.data[CONF_LEARNING_LOOKAHEAD_STEPS])
-        self._learning_config = {
-            **DEFAULT_LEARNING_SWITCH_CONFIG,
-            "lookahead_steps": self._lookahead_steps,
-            "history_steps": int(entry.data[CONF_LEARNING_HISTORY_STEPS]),
-            "l2_reg": float(entry.data[CONF_LEARNING_L2_REG]),
-            "error_decay": float(entry.data[CONF_LEARNING_ERROR_DECAY]),
-            "learning_rate": float(entry.data[CONF_LEARNING_RATE]),
-            "w_energy": float(entry.data[CONF_LEARNING_ENERGY]),
-        }
-        self._optimizer: LearningSwitchOptimizer | None = None
-        self._learning_state: dict[str, Any] | None = None
-        self._learning_result: dict[str, Any] | None = None
-        self._learning_last_tick = None
-        self._learning_on_percent: float | None = None
-        self._current_temperature: float | None = None
-        self._outside_temperature: float | None = None
-        self._hvac_mode = HVACMode.HEAT
+        self._controller = ThermostatController(self._config)
         self._attr_name = self._name
         self._attr_unique_id = entry.entry_id
         self._attr_should_poll = False
@@ -142,32 +109,32 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
     @property
     def current_temperature(self) -> float | None:
         """Return the current room temperature."""
-        return self._current_temperature
+        return self._controller.current_temperature
 
     @property
     def target_temperature(self) -> float | None:
         """Return the active target temperature."""
-        return self._target_temperature
+        return self._controller.target_temperature
 
     @property
     def min_temp(self) -> float:
         """Return the minimum allowed target temperature."""
-        return self._min_temp
+        return self._config.min_temperature
 
     @property
     def max_temp(self) -> float:
         """Return the maximum allowed target temperature."""
-        return self._max_temp
+        return self._config.max_temperature
 
     @property
     def hvac_mode(self) -> HVACMode:
         """Return the current HVAC mode."""
-        return self._hvac_mode
+        return self._controller.hvac_mode
 
     @property
     def hvac_action(self) -> HVACAction:
         """Return the current HVAC action."""
-        if self._hvac_mode == HVACMode.OFF:
+        if self._controller.hvac_mode == HVACMode.OFF:
             return HVACAction.OFF
         return HVACAction.HEATING if self._is_any_switch_active() else HVACAction.IDLE
 
@@ -175,39 +142,38 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         """Expose learning details for diagnostics and migration."""
         return {
-            "learning_state": self._learning_state,
-            "learning_result": self._learning_result,
+            "learning_state": self._controller.learning_state,
+            "learning_result": self._controller.learning_result,
             "learning_last_tick": (
-                self._learning_last_tick.isoformat()
-                if self._learning_last_tick is not None
+                self._controller.learning_last_tick.isoformat()
+                if self._controller.learning_last_tick is not None
                 else None
             ),
-            "outside_temperature": self._outside_temperature,
-            "on_percent": self._learning_on_percent,
-            "underlying_entities": list(self._switch_entity_ids),
-            "forecast_entity_id": self._forecast_entity_id,
+            "outside_temperature": self._controller.outside_temperature,
+            "on_percent": self._controller.learning_on_percent,
+            "underlying_entities": list(self._config.switch_entity_ids),
+            "forecast_entity_id": self._config.forecast_entity_id,
         }
 
     async def async_added_to_hass(self) -> None:
         """Register listeners and restore state."""
         await super().async_added_to_hass()
-        self.hass.data[DOMAIN][DATA_ENTITIES][self.entity_id] = self
         await self._async_restore_runtime_state()
         await self._async_refresh_temperature_inputs()
 
         self.async_on_remove(
             async_track_state_change_event(
                 self.hass,
-                [self._temperature_sensor_entity_id],
+                [self._config.temperature_sensor_entity_id],
                 self._async_handle_temperature_change,
             )
         )
 
-        if self._outdoor_sensor_entity_id:
+        if self._config.outdoor_sensor_entity_id:
             self.async_on_remove(
                 async_track_state_change_event(
                     self.hass,
-                    [self._outdoor_sensor_entity_id],
+                    [self._config.outdoor_sensor_entity_id],
                     self._async_handle_outdoor_temperature_change,
                 )
             )
@@ -215,7 +181,7 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
         self.async_on_remove(
             async_track_state_change_event(
                 self.hass,
-                self._switch_entity_ids,
+                list(self._config.switch_entity_ids),
                 self._async_handle_switch_change,
             )
         )
@@ -223,23 +189,22 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
             async_track_time_interval(
                 self.hass,
                 self._async_handle_scheduled_tick,
-                timedelta(minutes=self._cycle_minutes),
+                timedelta(minutes=self._config.cycle_minutes),
             )
         )
 
     async def async_will_remove_from_hass(self) -> None:
-        """Clean up the runtime entity registry."""
-        self.hass.data.get(DOMAIN, {}).get(DATA_ENTITIES, {}).pop(self.entity_id, None)
+        """Clean up any runtime resources."""
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Set the HVAC mode."""
-        self._hvac_mode = hvac_mode
+        self._controller.set_hvac_mode(hvac_mode)
         await self._async_run_control_cycle(force=True)
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
         """Set a new target temperature."""
         if ATTR_TEMPERATURE in kwargs:
-            self._target_temperature = float(kwargs[ATTR_TEMPERATURE])
+            self._controller.set_target_temperature(float(kwargs[ATTR_TEMPERATURE]))
             self.async_write_ha_state()
             await self._async_run_control_cycle(force=True)
 
@@ -253,29 +218,7 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
 
     async def async_reset_learning_service(self, preserve_history: bool = True) -> None:
         """Reset the persisted learning state."""
-        previous_state = self._learning_state if preserve_history else None
-        self._optimizer = LearningSwitchOptimizer(
-            self._name, config=self._learning_config
-        )
-        self._learning_result = None
-        base_state = self._optimizer.snapshot_state()
-        if preserve_history and isinstance(previous_state, dict):
-            history = previous_state.get("history")
-            if isinstance(history, dict):
-                history_copy = dict(history)
-                for key in (
-                    "pred_abs_error",
-                    "pred_timestamps",
-                    "k_step_abs_error",
-                    "k_step_pred_improvement",
-                ):
-                    history_copy.pop(key, None)
-                base_state["history"] = history_copy
-            for key in ("last_u", "last_plan"):
-                if key in previous_state:
-                    base_state[key] = previous_state.get(key)
-        self._optimizer.restore_state(base_state)
-        self._learning_state = self._optimizer.snapshot_state()
+        self._controller.reset_learning(preserve_history)
         await self._async_persist_learning_state()
         self.async_write_ha_state()
 
@@ -288,8 +231,8 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
         self, event: Event[EventStateChangedData]
     ) -> None:
         """Update the room temperature from a state event."""
-        self._current_temperature = _coerce_state_temperature(
-            event.data.get("new_state")
+        self._controller.update_current_temperature(
+            _coerce_state_temperature(event.data.get("new_state"))
         )
         self.async_write_ha_state()
 
@@ -298,8 +241,8 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
         self, event: Event[EventStateChangedData]
     ) -> None:
         """Update the outdoor temperature from a state event."""
-        self._outside_temperature = _coerce_state_temperature(
-            event.data.get("new_state")
+        self._controller.update_outside_temperature(
+            _coerce_state_temperature(event.data.get("new_state"))
         )
         self.async_write_ha_state()
 
@@ -316,126 +259,67 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
 
     async def _async_refresh_temperature_inputs(self) -> None:
         """Load current sensor values from the state machine."""
-        self._current_temperature = _coerce_state_temperature(
-            self.hass.states.get(self._temperature_sensor_entity_id)
+        self._controller.update_current_temperature(
+            _coerce_state_temperature(
+                self.hass.states.get(self._config.temperature_sensor_entity_id)
+            )
         )
-        if self._outdoor_sensor_entity_id:
-            self._outside_temperature = _coerce_state_temperature(
-                self.hass.states.get(self._outdoor_sensor_entity_id)
+        if self._config.outdoor_sensor_entity_id:
+            self._controller.update_outside_temperature(
+                _coerce_state_temperature(
+                    self.hass.states.get(self._config.outdoor_sensor_entity_id)
+                )
             )
 
     async def _async_restore_runtime_state(self) -> None:
         """Restore the HA and learning state from storage."""
+        hvac_mode = HVACMode.HEAT
+        restored_target: float | None = None
         old_state = await self.async_get_last_state()
         if old_state is not None:
             if old_state.state in (HVACMode.HEAT, HVACMode.OFF):
-                self._hvac_mode = HVACMode(old_state.state)
-            restored_target = old_state.attributes.get(ATTR_TEMPERATURE)
-            if restored_target is not None:
-                self._target_temperature = float(restored_target)
+                hvac_mode = HVACMode(old_state.state)
+            restored_target = _coerce_float(old_state.attributes.get(ATTR_TEMPERATURE))
 
         stored = await self._store.async_get_entry(self._entry.entry_id)
-        if stored is None:
-            return
-
-        learning_state = stored.get("learning_state")
-        if isinstance(learning_state, dict):
-            self._learning_state = learning_state
-        last_tick = stored.get("learning_last_tick")
-        if isinstance(last_tick, str):
-            self._learning_last_tick = dt_util.parse_datetime(last_tick)
-        self._current_temperature = _first_not_none(
-            self._current_temperature,
-            _coerce_float(stored.get("current_temperature")),
+        self._controller.restore(
+            hvac_mode=hvac_mode,
+            target_temperature=restored_target,
+            stored_payload=stored,
         )
-        self._outside_temperature = _first_not_none(
-            self._outside_temperature,
-            _coerce_float(stored.get("outside_temperature")),
-        )
-
-    def _ensure_optimizer(self) -> LearningSwitchOptimizer:
-        """Return the optimizer, restoring persisted state when available."""
-        if self._optimizer is None:
-            self._optimizer = LearningSwitchOptimizer(
-                self._name,
-                config=self._learning_config,
-            )
-            if self._learning_state is not None:
-                self._optimizer.restore_state(self._learning_state)
-        return self._optimizer
 
     async def _async_run_control_cycle(self, force: bool) -> bool:
         """Run one thermostat control cycle."""
         await self._async_refresh_temperature_inputs()
-
-        if self._hvac_mode == HVACMode.OFF:
-            self._learning_on_percent = 0.0
-            await self._async_turn_all_switches(False)
-            await self._async_persist_learning_state()
-            self.async_write_ha_state()
-            return True
-
-        if not force and self._learning_last_tick is not None:
-            elapsed = dt_util.utcnow() - self._learning_last_tick
-            if elapsed < timedelta(minutes=self._cycle_minutes):
-                return False
-
-        if self._current_temperature is None or self._target_temperature is None:
-            _LOGGER.debug(
-                "Skipping learning cycle because room temperature or target temperature is missing"
-            )
-            return False
-
         forecast_temperatures = await self._async_get_forecast_temperatures(
-            self._lookahead_steps
+            self._config.lookahead_steps
         )
-        outside_temperature = self._outside_temperature
-        if outside_temperature is None and forecast_temperatures:
-            outside_temperature = forecast_temperatures[0]
-        if outside_temperature is None:
-            outside_temperature = self._current_temperature
-
-        optimizer = self._ensure_optimizer()
-        result = optimizer.tick(
-            self._current_temperature,
-            outside_temperature,
-            self._target_temperature,
-            forecast_temperatures,
-            current_u=1 if self._is_any_switch_active() else 0,
-            step_minutes=self._cycle_minutes,
-            timestamp=dt_util.utcnow().timestamp(),
+        ran = await self._controller.run_control_cycle(
+            force=force,
+            forecast_temperatures=forecast_temperatures,
+            current_switch_active=self._is_any_switch_active(),
+            turn_switches=self._async_turn_all_switches,
+            persist=self._async_persist_learning_state_payload,
         )
-        self._learning_result = result
-        self._learning_state = optimizer.snapshot_state()
-        self._learning_last_tick = dt_util.utcnow()
-        should_heat = bool(result.get("u_planned", 0))
-        self._learning_on_percent = 1.0 if should_heat else 0.0
-
-        await self._async_turn_all_switches(should_heat)
-        await self._async_persist_learning_state()
         self.async_write_ha_state()
-        return True
+        return ran
 
     async def _async_persist_learning_state(self) -> None:
         """Persist the learning state contract used by restore and migration."""
-        await self._store.async_save_entry(
-            self._entry.entry_id,
-            build_entry_payload(
-                learning_state=self._learning_state,
-                learning_last_tick=(
-                    self._learning_last_tick.isoformat()
-                    if self._learning_last_tick is not None
-                    else None
-                ),
-                current_temperature=self._current_temperature,
-                outside_temperature=self._outside_temperature,
-            ),
+        await self._async_persist_learning_state_payload(
+            self._controller.build_persisted_payload()
         )
+
+    async def _async_persist_learning_state_payload(
+        self, payload: LearningEntryPayload
+    ) -> None:
+        """Persist one controller payload."""
+        await self._store.async_save_entry(self._entry.entry_id, payload)
 
     async def _async_turn_all_switches(self, turn_on: bool) -> None:
         """Turn all configured switch entities on or off."""
         service = "turn_on" if turn_on else "turn_off"
-        for entity_id in self._switch_entity_ids:
+        for entity_id in self._config.switch_entity_ids:
             await self.hass.services.async_call(
                 entity_id.split(".", 1)[0],
                 service,
@@ -445,7 +329,7 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
 
     def _is_any_switch_active(self) -> bool:
         """Return whether any configured switch is currently on."""
-        for entity_id in self._switch_entity_ids:
+        for entity_id in self._config.switch_entity_ids:
             state = self.hass.states.get(entity_id)
             if state is not None and state.state == STATE_ON:
                 return True
@@ -453,10 +337,10 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
 
     async def _async_get_forecast_temperatures(self, steps: int) -> list[float]:
         """Build forecast temperatures for the lookahead horizon."""
-        if not self._forecast_entity_id or steps <= 0:
+        if not self._config.forecast_entity_id or steps <= 0:
             return []
 
-        state = self.hass.states.get(self._forecast_entity_id)
+        state = self.hass.states.get(self._config.forecast_entity_id)
         if state is None:
             return []
 
@@ -464,8 +348,10 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
         if isinstance(forecast, list):
             return _coerce_forecast_list(forecast, steps)
 
-        if self._forecast_entity_id.split(".", 1)[0] == WEATHER_DOMAIN:
-            fetched = await _async_weather_forecast(self.hass, self._forecast_entity_id)
+        if self._config.forecast_entity_id.split(".", 1)[0] == WEATHER_DOMAIN:
+            fetched = await _async_weather_forecast(
+                self.hass, self._config.forecast_entity_id
+            )
             return _coerce_forecast_list(fetched, steps)
 
         return []
@@ -523,8 +409,36 @@ def _coerce_float(value: Any) -> float | None:
         return None
 
 
-def _first_not_none(*values):
-    for value in values:
-        if value is not None:
-            return value
-    return None
+def _async_ensure_entity_services_registered(hass: HomeAssistant) -> None:
+    """Register integration services once against HA's entity registry."""
+    data = hass.data.setdefault(DOMAIN, {})
+    if data.get(DATA_SERVICES_REGISTERED):
+        return
+    if hass.services.has_service(DOMAIN, SERVICE_RESET_LEARNING):
+        data[DATA_SERVICES_REGISTERED] = True
+        return
+
+    platform = async_get_current_platform()
+    hass_service.async_register_entity_service(
+        hass,
+        DOMAIN,
+        SERVICE_RESET_LEARNING,
+        entities=platform.entities,
+        func="async_reset_learning_service",
+        job_type=None,
+        schema={
+            vol.Optional("preserve_history", default=True): cv.boolean,
+        },
+    )
+    hass_service.async_register_entity_service(
+        hass,
+        DOMAIN,
+        SERVICE_TRIGGER_TICK,
+        entities=platform.entities,
+        func="async_trigger_tick_service",
+        job_type=None,
+        schema={
+            vol.Optional("force", default=False): cv.boolean,
+        },
+    )
+    data[DATA_SERVICES_REGISTERED] = True
