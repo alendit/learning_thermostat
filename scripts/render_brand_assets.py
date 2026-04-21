@@ -72,11 +72,11 @@ def book_svg(theme: Theme) -> str:
       <g>
         <rect x="24" y="20" width="112" height="120" rx="24" fill="{theme.shell}"/>
         <rect x="38" y="20" width="14" height="120" rx="7" fill="{theme.spine}"/>
-        <path d="M56 43c8-4 17-6 28-6 14 0 26 4 33 13 7-9 19-13 33-13v60c-14 0-26 4-33 12-7-8-19-12-33-12-11 0-20 2-28 6z" fill="{theme.page}"/>
+        <path d="M56 44c8-4 17-6 28-6 14 0 26 4 32 12v48c-7-6-18-10-32-10-11 0-20 2-28 6" fill="none" stroke="{theme.page}" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M116 50c7-8 18-12 32-12 5 0 10 0 14 1v59c-4-1-9-1-14-1-14 0-25 4-32 11" fill="none" stroke="{theme.page}" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
         <rect x="75" y="53" width="10" height="30" rx="5" fill="{theme.shell}"/>
         <circle cx="80" cy="94" r="15" fill="{theme.shell}"/>
-        <rect x="77" y="58" width="6" height="23" rx="3" fill="{theme.accent}"/>
-        <circle cx="80" cy="94" r="7" fill="{theme.accent}"/>
+        <rect x="77" y="56" width="6" height="28" rx="3" fill="{theme.accent}"/>
         <path d="M80 48v57" stroke="{theme.center_line}" stroke-width="2.5" opacity="0.55"/>
       </g>
     """.strip()
@@ -131,25 +131,24 @@ def draw_mark(
         (sx(56), sy(43)),
         (sx(67), sy(38)),
         (sx(84), sy(39)),
-        (sx(88), sy(54)),
-        (sx(88), sy(103)),
-        (sx(79), sy(98)),
-        (sx(67), sy(96)),
-        (sx(56), sy(102)),
+        (sx(88), sy(50)),
+        (sx(88), sy(98)),
+        (sx(79), sy(92)),
+        (sx(67), sy(90)),
+        (sx(56), sy(96)),
     ]
     right_page = [
-        (sx(84), sy(39)),
-        (sx(97), sy(37)),
-        (sx(112), sy(41)),
-        (sx(121), sy(50)),
+        (sx(88), sy(50)),
+        (sx(97), sy(38)),
+        (sx(112), sy(38)),
+        (sx(121), sy(39)),
         (sx(121), sy(97)),
-        (sx(111), sy(100)),
-        (sx(97), sy(104)),
-        (sx(88), sy(103)),
-        (sx(88), sy(54)),
+        (sx(111), sy(96)),
+        (sx(97), sy(100)),
+        (sx(88), sy(109)),
     ]
-    draw.polygon(left_page, fill=theme.page)
-    draw.polygon(right_page, fill=theme.page)
+    draw.line(left_page, fill=theme.page, width=max(1, int(8 * scale)), joint="curve")
+    draw.line(right_page, fill=theme.page, width=max(1, int(8 * scale)), joint="curve")
     draw.line(
         (sx(80), sy(48), sx(80), sy(105)),
         fill=theme.center_line,
@@ -157,8 +156,7 @@ def draw_mark(
     )
     rounded_rect(draw, (sx(75), sy(53), sx(85), sy(83)), 5 * scale, theme.shell)
     draw.ellipse((sx(65), sy(79), sx(95), sy(109)), fill=theme.shell)
-    rounded_rect(draw, (sx(77), sy(58), sx(83), sy(81)), 3 * scale, theme.accent)
-    draw.ellipse((sx(73), sy(87), sx(87), sy(101)), fill=theme.accent)
+    rounded_rect(draw, (sx(77), sy(56), sx(83), sy(84)), 3 * scale, theme.accent)
 
 
 def render_icon(theme: Theme, size: int) -> Image.Image:
