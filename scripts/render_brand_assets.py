@@ -5,7 +5,6 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-
 ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = ROOT / "assets" / "brand"
 OUT_DIR = ROOT / "custom_components" / "learning_thermostat" / "brand"
@@ -93,11 +92,18 @@ def logo_svg(theme: Theme, width: int, height: int) -> str:
 """
 
 
-def rounded_rect(draw: ImageDraw.ImageDraw, box: tuple[float, float, float, float], radius: float, fill: str) -> None:
+def rounded_rect(
+    draw: ImageDraw.ImageDraw,
+    box: tuple[float, float, float, float],
+    radius: float,
+    fill: str,
+) -> None:
     draw.rounded_rectangle(box, radius=radius, fill=fill)
 
 
-def draw_mark(img: Image.Image, theme: Theme, offset: tuple[float, float], scale: float) -> None:
+def draw_mark(
+    img: Image.Image, theme: Theme, offset: tuple[float, float], scale: float
+) -> None:
     draw = ImageDraw.Draw(img)
     ox, oy = offset
 
@@ -133,7 +139,11 @@ def draw_mark(img: Image.Image, theme: Theme, offset: tuple[float, float], scale
     ]
     draw.polygon(left_page, fill=theme.page)
     draw.polygon(right_page, fill=theme.page)
-    draw.line((sx(80), sy(48), sx(80), sy(105)), fill=theme.center_line, width=max(1, int(2.5 * scale)))
+    draw.line(
+        (sx(80), sy(48), sx(80), sy(105)),
+        fill=theme.center_line,
+        width=max(1, int(2.5 * scale)),
+    )
     rounded_rect(draw, (sx(75), sy(53), sx(85), sy(83)), 5 * scale, theme.shell)
     draw.ellipse((sx(65), sy(79), sx(95), sy(109)), fill=theme.shell)
     rounded_rect(draw, (sx(77), sy(58), sx(83), sy(81)), 3 * scale, theme.accent)
