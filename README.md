@@ -20,7 +20,12 @@ Brand assets use this ownership model:
 Home Assistant reads the PNG files from the integration `brand/` directory.
 When branding changes, update the SVG source assets first and then refresh the
 PNG files in `custom_components/learning_thermostat/brand/` from those source
-files.
+files:
+
+```bash
+npm install
+npm run export:brand
+```
 
 ## Scope
 

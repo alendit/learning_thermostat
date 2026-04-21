@@ -1,0 +1,12 @@
+{
+  "name": "learning-thermostat-brand-tools",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "export:brand": "node scripts/export_brand_assets.mjs",
+    "test:brand": "node --test tests/export_brand_assets.test.mjs"
+  },
+  "devDependencies": {
+    "sharp": "^0.34.4"
+  }
+}
