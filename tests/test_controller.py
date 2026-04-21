@@ -190,7 +190,9 @@ async def test_run_control_cycle_delegates_to_optimizer_and_persists_state() -> 
 
 
 @pytest.mark.asyncio
-async def test_run_control_cycle_falls_back_to_forecast_outside_temperature_for_weather_source() -> None:
+async def test_run_control_cycle_falls_back_to_forecast_outside_temperature_for_weather_source() -> (
+    None
+):
     """Weather-backed entries should use the first forecast when no current outdoor value exists."""
     fixed_now = datetime(2026, 4, 21, 12, 0, tzinfo=UTC)
     optimizer = StubOptimizer()

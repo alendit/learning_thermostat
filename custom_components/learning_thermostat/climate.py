@@ -391,9 +391,7 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
             return _coerce_forecast_list(forecast, steps)
 
         if forecast_entity_id.split(".", 1)[0] == WEATHER_DOMAIN:
-            fetched = await _async_weather_forecast(
-                self.hass, forecast_entity_id
-            )
+            fetched = await _async_weather_forecast(self.hass, forecast_entity_id)
             return _coerce_forecast_list(fetched, steps)
 
         return []
@@ -401,8 +399,9 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
     @property
     def _forecast_entity_id(self) -> str | None:
         """Return the best forecast source for the configured outdoor input."""
-        if self._config.outdoor_entity_id and self._config.outdoor_entity_id.startswith(
-            f"{WEATHER_DOMAIN}."
+        if (
+            self._config.outdoor_entity_id
+            and self._config.outdoor_entity_id.startswith(f"{WEATHER_DOMAIN}.")
         ):
             return self._config.outdoor_entity_id
         return self._config.legacy_forecast_entity_id
@@ -470,7 +469,9 @@ def _detect_pirate_weather_solar_entities(
     forecast_candidates.sort(key=lambda item: item[0])
     return DetectedSolarEntities(
         current_entity_id=current_entity_id,
-        forecast_entity_ids=tuple(entity_id for _hour, entity_id in forecast_candidates),
+        forecast_entity_ids=tuple(
+            entity_id for _hour, entity_id in forecast_candidates
+        ),
     )
 
 

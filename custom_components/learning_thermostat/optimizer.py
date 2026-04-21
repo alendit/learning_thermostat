@@ -145,7 +145,9 @@ class LearningSwitchOptimizer:
         """Serialize weights and history for persistence/debugging."""
         return {
             "weights": self._weights.tolist(),
-            "model": "delta_zscore_solar" if self._use_solar_feature else "delta_zscore",
+            "model": (
+                "delta_zscore_solar" if self._use_solar_feature else "delta_zscore"
+            ),
             "history": {
                 "t_room": list(self._t_hist),
                 "t_out": list(self._out_hist),
@@ -278,7 +280,9 @@ class LearningSwitchOptimizer:
         except Exception as exc:  # noqa: BLE001 - keep restore resilient
             _LOGGER.warning("%s - Learning state restore failed: %s", self._name, exc)
 
-    def _adapt_weights(self, restored: np.ndarray, model_type: str | None) -> np.ndarray | None:
+    def _adapt_weights(
+        self, restored: np.ndarray, model_type: str | None
+    ) -> np.ndarray | None:
         """Adapt weights saved with a different history length."""
         size = restored.size
         if size < 4:
@@ -302,12 +306,8 @@ class LearningSwitchOptimizer:
             semantic_order_new.append("solar")
         semantic_order_new.append("u")
 
-        old_group_index = {
-            key: idx for idx, key in enumerate(semantic_order_old)
-        }
-        new_group_index = {
-            key: idx for idx, key in enumerate(semantic_order_new)
-        }
+        old_group_index = {key: idx for idx, key in enumerate(semantic_order_old)}
+        new_group_index = {key: idx for idx, key in enumerate(semantic_order_new)}
         for key in ("t_room", "t_out", "solar", "u"):
             if key not in old_group_index or key not in new_group_index:
                 continue
@@ -861,7 +861,9 @@ class LearningSwitchOptimizer:
         features: list[np.ndarray] = []
         t_hist_cur = np.array(t_hist, dtype=float)
         out_hist_cur = np.array(out_hist, dtype=float)
-        solar_hist_cur = np.array(solar_hist, dtype=float) if solar_hist is not None else None
+        solar_hist_cur = (
+            np.array(solar_hist, dtype=float) if solar_hist is not None else None
+        )
         u_hist_cur = np.array(u_hist, dtype=float)
 
         for idx in range(steps):
@@ -962,7 +964,15 @@ class LearningSwitchOptimizer:
         best_start = steps
         best_stop = steps
         best_cost, _ = self._simulate_schedule(
-            t_hist, out_hist, solar_hist, u_hist, t_set, t_outs, solar_forecast, steps, steps
+            t_hist,
+            out_hist,
+            solar_hist,
+            u_hist,
+            t_set,
+            t_outs,
+            solar_forecast,
+            steps,
+            steps,
         )
         for start in range(steps + 1):
             for stop in range(start, steps + 1):
@@ -1290,7 +1300,9 @@ class LearningSwitchOptimizer:
 
         t_outs_max = self._build_forecast(t_out, t_out_forecast, max_steps)
         t_outs = t_outs_max[:steps]
-        solar_outs_max = self._build_solar_forecast(solar_current, solar_forecast, max_steps)
+        solar_outs_max = self._build_solar_forecast(
+            solar_current, solar_forecast, max_steps
+        )
         solar_outs = solar_outs_max[:steps]
 
         prev_pred = self._prev_pred_history[0] if self._prev_pred_history else None

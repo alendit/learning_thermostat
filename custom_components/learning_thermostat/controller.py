@@ -73,7 +73,11 @@ class ThermostatConfig:
             outdoor_entity_id = _coerce_optional_str(
                 data.get("outdoor_temperature_sensor_entity_id")
             )
-        if outdoor_entity_id is None and legacy_forecast_entity_id and legacy_forecast_entity_id.startswith("weather."):
+        if (
+            outdoor_entity_id is None
+            and legacy_forecast_entity_id
+            and legacy_forecast_entity_id.startswith("weather.")
+        ):
             outdoor_entity_id = legacy_forecast_entity_id
 
         return cls(

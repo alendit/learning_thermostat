@@ -94,7 +94,9 @@ async def test_schema_allows_weather_or_sensor_for_outdoor_source() -> None:
     schema = _schema()
 
     field = next(
-        key for key in schema.schema if getattr(key, "schema", None) == CONF_OUTDOOR_ENTITY_ID
+        key
+        for key in schema.schema
+        if getattr(key, "schema", None) == CONF_OUTDOOR_ENTITY_ID
     )
     entity_selector = schema.schema[field]
 
