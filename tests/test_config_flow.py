@@ -18,7 +18,7 @@ from custom_components.learning_thermostat.const import (
     CONF_LEARNING_RATE,
     CONF_MAX_TEMPERATURE,
     CONF_MIN_TEMPERATURE,
-    CONF_OUTDOOR_TEMPERATURE_SENSOR_ENTITY_ID,
+    CONF_OUTDOOR_ENTITY_ID,
     CONF_TARGET_TEMPERATURE,
     CONF_TEMPERATURE_SENSOR_ENTITY_ID,
     CONF_UNDERLYING_ENTITY_IDS,
@@ -33,7 +33,7 @@ def _user_input() -> dict:
         "name": "Kitchen Floor",
         CONF_UNDERLYING_ENTITY_IDS: ["switch.floor_a", "switch.floor_b"],
         CONF_TEMPERATURE_SENSOR_ENTITY_ID: "sensor.kitchen_temperature",
-        CONF_OUTDOOR_TEMPERATURE_SENSOR_ENTITY_ID: "sensor.outside_temperature",
+        CONF_OUTDOOR_ENTITY_ID: "weather.home",
         CONF_CYCLE_MINUTES: 15,
         CONF_TARGET_TEMPERATURE: 21.5,
         CONF_MIN_TEMPERATURE: 15.0,
@@ -87,6 +87,19 @@ async def test_schema_accepts_input_boolean_underlyings() -> None:
 
     assert isinstance(entity_selector, selector.EntitySelector)
     assert entity_selector.config["domain"] == ["switch", "input_boolean"]
+
+
+async def test_schema_allows_weather_or_sensor_for_outdoor_source() -> None:
+    """The outdoor source should accept either a weather entity or a sensor."""
+    schema = _schema()
+
+    field = next(
+        key for key in schema.schema if getattr(key, "schema", None) == CONF_OUTDOOR_ENTITY_ID
+    )
+    entity_selector = schema.schema[field]
+
+    assert isinstance(entity_selector, selector.EntitySelector)
+    assert entity_selector.config["domain"] == ["weather", "sensor"]
 
 
 async def test_user_flow_rejects_duplicate_switch_set(hass) -> None:

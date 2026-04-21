@@ -11,6 +11,7 @@ PLATFORMS = [Platform.CLIMATE]
 
 CONF_UNDERLYING_ENTITY_IDS = "underlying_entity_ids"
 CONF_TEMPERATURE_SENSOR_ENTITY_ID = "temperature_sensor_entity_id"
+CONF_OUTDOOR_ENTITY_ID = "outdoor_entity_id"
 CONF_OUTDOOR_TEMPERATURE_SENSOR_ENTITY_ID = "outdoor_temperature_sensor_entity_id"
 CONF_FORECAST_ENTITY_ID = "forecast_entity_id"
 CONF_CYCLE_MINUTES = "cycle_minutes"

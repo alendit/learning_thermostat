@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import pytest
+from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
     async_mock_service,
 )
 
+from custom_components.learning_thermostat import climate as climate_module
 from custom_components.learning_thermostat.const import (
     CONF_CYCLE_MINUTES,
     CONF_LEARNING_ENERGY,
@@ -18,7 +20,7 @@ from custom_components.learning_thermostat.const import (
     CONF_LEARNING_RATE,
     CONF_MAX_TEMPERATURE,
     CONF_MIN_TEMPERATURE,
-    CONF_OUTDOOR_TEMPERATURE_SENSOR_ENTITY_ID,
+    CONF_OUTDOOR_ENTITY_ID,
     CONF_TARGET_TEMPERATURE,
     CONF_TEMPERATURE_SENSOR_ENTITY_ID,
     CONF_UNDERLYING_ENTITY_IDS,
@@ -38,7 +40,7 @@ def _entry() -> MockConfigEntry:
             "name": "Kitchen Floor",
             CONF_UNDERLYING_ENTITY_IDS: ["switch.floor_a", "switch.floor_b"],
             CONF_TEMPERATURE_SENSOR_ENTITY_ID: "sensor.kitchen_temperature",
-            CONF_OUTDOOR_TEMPERATURE_SENSOR_ENTITY_ID: "sensor.outside_temperature",
+            CONF_OUTDOOR_ENTITY_ID: "sensor.outside_temperature",
             CONF_CYCLE_MINUTES: 15,
             CONF_TARGET_TEMPERATURE: 21.5,
             CONF_MIN_TEMPERATURE: 15.0,
@@ -146,3 +148,120 @@ async def test_reset_learning_preserves_state_shape(hass) -> None:
     state = hass.states.get("climate.kitchen_floor")
     assert state is not None
     assert "history" in state.attributes["learning_state"]
+
+
+async def test_weather_entity_provides_current_and_forecast_outdoor_temperature(
+    hass, monkeypatch
+) -> None:
+    """A weather outdoor source should drive both current and forecast temperatures."""
+    hass.states.async_set("sensor.kitchen_temperature", "18.0")
+    hass.states.async_set(
+        "weather.home",
+        "sunny",
+        {
+            "temperature": 7.0,
+        },
+    )
+    hass.states.async_set("switch.floor_a", "off")
+    hass.states.async_set("switch.floor_b", "off")
+    async_mock_service(hass, "switch", "turn_on")
+    async_mock_service(hass, "switch", "turn_off")
+
+    async def fake_weather_forecast(_hass, _entity_id, _forecast_type="hourly"):
+        return {
+            "forecast": [
+                {"temperature": 6.5},
+                {"temperature": 6.0},
+            ]
+        }
+
+    monkeypatch.setattr(
+        climate_module, "async_weather_get_forecast", fake_weather_forecast
+    )
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Kitchen Floor",
+        data={
+            **_entry().data,
+            CONF_OUTDOOR_ENTITY_ID: "weather.home",
+        },
+    )
+    entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    await hass.services.async_call(
+        DOMAIN,
+        SERVICE_TRIGGER_TICK,
+        {"entity_id": "climate.kitchen_floor", "force": True},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+
+    state = hass.states.get("climate.kitchen_floor")
+    assert state is not None
+    assert state.attributes["outside_temperature"] == 7.0
+    assert state.attributes["learning_result"]["forecast_temps"][:2] == [6.5, 6.0]
+
+
+async def test_detect_pirate_weather_solar_entities(hass) -> None:
+    """Pirate Weather entries should auto-link the current and hourly solar sensors."""
+    pirate_entry = MockConfigEntry(domain="pirateweather", title="Pirate Weather")
+    pirate_entry.add_to_hass(hass)
+
+    registry = er.async_get(hass)
+    weather_entry = registry.async_get_or_create(
+        "weather",
+        "pirateweather",
+        "weather-unique",
+        config_entry=pirate_entry,
+        object_id_base="home",
+        original_name="Home",
+    )
+    registry.async_get_or_create(
+        "sensor",
+        "pirateweather",
+        "solar-current",
+        config_entry=pirate_entry,
+        object_id_base="home_solar",
+        original_name="Downward Short-Wave Radiation Flux",
+        translation_key="solar",
+    )
+    registry.async_get_or_create(
+        "sensor",
+        "pirateweather",
+        "solar-1h",
+        config_entry=pirate_entry,
+        object_id_base="home_solar_1h",
+        original_name="Downward Short-Wave Radiation Flux 1h",
+        translation_key="solar",
+    )
+    registry.async_get_or_create(
+        "sensor",
+        "pirateweather",
+        "solar-2h",
+        config_entry=pirate_entry,
+        object_id_base="home_solar_2h",
+        original_name="Downward Short-Wave Radiation Flux 2h",
+        translation_key="solar",
+    )
+    registry.async_get_or_create(
+        "sensor",
+        "pirateweather",
+        "solar-max",
+        config_entry=pirate_entry,
+        object_id_base="home_solar_max",
+        original_name="Downward Short-Wave Radiation Flux Max",
+        translation_key="solar_max",
+    )
+
+    detected = climate_module._detect_pirate_weather_solar_entities(
+        hass, weather_entry.entity_id
+    )
+
+    assert detected.current_entity_id == "sensor.home_solar"
+    assert list(detected.forecast_entity_ids) == [
+        "sensor.home_solar_1h",
+        "sensor.home_solar_2h",
+    ]

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import timedelta
+import re
 from typing import Any
 
 import voluptuous as vol
@@ -30,6 +32,7 @@ from homeassistant.core import (
     callback,
 )
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import service as hass_service
 from homeassistant.helpers.entity_platform import (
     AddEntitiesCallback,
@@ -100,6 +103,7 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
         self._attr_name = self._name
         self._attr_unique_id = entry.entry_id
         self._attr_should_poll = False
+        self._detected_solar = DetectedSolarEntities()
 
     @property
     def temperature_unit(self) -> str:
@@ -150,15 +154,24 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
                 else None
             ),
             "outside_temperature": self._controller.outside_temperature,
+            "current_solar": self._controller.current_solar,
             "on_percent": self._controller.learning_on_percent,
             "underlying_entities": list(self._config.switch_entity_ids),
-            "forecast_entity_id": self._config.forecast_entity_id,
+            "outdoor_entity_id": self._config.outdoor_entity_id,
+            "legacy_forecast_entity_id": self._config.legacy_forecast_entity_id,
+            "solar_entity_id": self._detected_solar.current_entity_id,
+            "solar_forecast_entity_ids": list(self._detected_solar.forecast_entity_ids),
         }
 
     async def async_added_to_hass(self) -> None:
         """Register listeners and restore state."""
         await super().async_added_to_hass()
         await self._async_restore_runtime_state()
+        self._detected_solar = _detect_pirate_weather_solar_entities(
+            self.hass, self._config.outdoor_entity_id
+        )
+        if self._detected_solar.current_entity_id:
+            self._config.learning_config["use_solar_feature"] = True
         await self._async_refresh_temperature_inputs()
 
         self.async_on_remove(
@@ -169,12 +182,20 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
             )
         )
 
-        if self._config.outdoor_sensor_entity_id:
+        if self._config.outdoor_entity_id:
             self.async_on_remove(
                 async_track_state_change_event(
                     self.hass,
-                    [self._config.outdoor_sensor_entity_id],
+                    [self._config.outdoor_entity_id],
                     self._async_handle_outdoor_temperature_change,
+                )
+            )
+        if self._detected_solar.current_entity_id:
+            self.async_on_remove(
+                async_track_state_change_event(
+                    self.hass,
+                    [self._detected_solar.current_entity_id],
+                    self._async_handle_solar_change,
                 )
             )
 
@@ -242,6 +263,16 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
     ) -> None:
         """Update the outdoor temperature from a state event."""
         self._controller.update_outside_temperature(
+            _coerce_outdoor_temperature(event.data.get("new_state"))
+        )
+        self.async_write_ha_state()
+
+    @callback
+    async def _async_handle_solar_change(
+        self, event: Event[EventStateChangedData]
+    ) -> None:
+        """Update the solar intensity from a state event."""
+        self._controller.update_current_solar(
             _coerce_state_temperature(event.data.get("new_state"))
         )
         self.async_write_ha_state()
@@ -264,12 +295,19 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
                 self.hass.states.get(self._config.temperature_sensor_entity_id)
             )
         )
-        if self._config.outdoor_sensor_entity_id:
+        if self._config.outdoor_entity_id:
             self._controller.update_outside_temperature(
-                _coerce_state_temperature(
-                    self.hass.states.get(self._config.outdoor_sensor_entity_id)
+                _coerce_outdoor_temperature(
+                    self.hass.states.get(self._config.outdoor_entity_id)
                 )
             )
+        self._controller.update_current_solar(
+            _coerce_state_temperature(
+                self.hass.states.get(self._detected_solar.current_entity_id)
+                if self._detected_solar.current_entity_id
+                else None
+            )
+        )
 
     async def _async_restore_runtime_state(self) -> None:
         """Restore the HA and learning state from storage."""
@@ -294,9 +332,12 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
         forecast_temperatures = await self._async_get_forecast_temperatures(
             self._config.lookahead_steps
         )
+        solar_forecast = self._async_get_solar_forecast(self._config.lookahead_steps)
         ran = await self._controller.run_control_cycle(
             force=force,
             forecast_temperatures=forecast_temperatures,
+            solar=self._controller.current_solar,
+            solar_forecast=solar_forecast,
             current_switch_active=self._is_any_switch_active(),
             turn_switches=self._async_turn_all_switches,
             persist=self._async_persist_learning_state_payload,
@@ -337,10 +378,11 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
 
     async def _async_get_forecast_temperatures(self, steps: int) -> list[float]:
         """Build forecast temperatures for the lookahead horizon."""
-        if not self._config.forecast_entity_id or steps <= 0:
+        forecast_entity_id = self._forecast_entity_id
+        if not forecast_entity_id or steps <= 0:
             return []
 
-        state = self.hass.states.get(self._config.forecast_entity_id)
+        state = self.hass.states.get(forecast_entity_id)
         if state is None:
             return []
 
@@ -348,13 +390,121 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
         if isinstance(forecast, list):
             return _coerce_forecast_list(forecast, steps)
 
-        if self._config.forecast_entity_id.split(".", 1)[0] == WEATHER_DOMAIN:
+        if forecast_entity_id.split(".", 1)[0] == WEATHER_DOMAIN:
             fetched = await _async_weather_forecast(
-                self.hass, self._config.forecast_entity_id
+                self.hass, forecast_entity_id
             )
             return _coerce_forecast_list(fetched, steps)
 
         return []
+
+    @property
+    def _forecast_entity_id(self) -> str | None:
+        """Return the best forecast source for the configured outdoor input."""
+        if self._config.outdoor_entity_id and self._config.outdoor_entity_id.startswith(
+            f"{WEATHER_DOMAIN}."
+        ):
+            return self._config.outdoor_entity_id
+        return self._config.legacy_forecast_entity_id
+
+    def _async_get_solar_forecast(self, steps: int) -> list[float]:
+        """Build a solar forecast series from linked forecast sensors."""
+        if steps <= 0 or not self._detected_solar.forecast_entity_ids:
+            return []
+        forecast: list[float] = []
+        for entity_id in self._detected_solar.forecast_entity_ids:
+            value = _coerce_state_temperature(self.hass.states.get(entity_id))
+            if value is None:
+                continue
+            forecast.append(value)
+            if len(forecast) == steps:
+                break
+        return forecast
+
+
+@dataclass(frozen=True, slots=True)
+class DetectedSolarEntities:
+    """Resolved solar entities associated with one outdoor weather entity."""
+
+    current_entity_id: str | None = None
+    forecast_entity_ids: tuple[str, ...] = ()
+
+
+def _detect_pirate_weather_solar_entities(
+    hass: HomeAssistant, weather_entity_id: str | None
+) -> DetectedSolarEntities:
+    """Resolve linked Pirate Weather solar entities from the entity registry."""
+    if not weather_entity_id or not weather_entity_id.startswith(f"{WEATHER_DOMAIN}."):
+        return DetectedSolarEntities()
+
+    registry = er.async_get(hass)
+    weather_entry = registry.async_get(weather_entity_id)
+    if weather_entry is None:
+        return DetectedSolarEntities()
+
+    platform = getattr(weather_entry, "platform", None)
+    config_entry_id = getattr(weather_entry, "config_entry_id", None)
+    if config_entry_id is None:
+        return DetectedSolarEntities()
+    if platform != "pirateweather":
+        config_entry = hass.config_entries.async_get_entry(config_entry_id)
+        if config_entry is None or config_entry.domain != "pirateweather":
+            return DetectedSolarEntities()
+
+    current_entity_id: str | None = None
+    forecast_candidates: list[tuple[int, str]] = []
+    for entry in er.async_entries_for_config_entry(registry, config_entry_id):
+        if entry.domain != "sensor" or entry.disabled_by is not None:
+            continue
+        if _registry_entry_key(entry) == "solar_max":
+            continue
+        if _registry_entry_key(entry) != "solar":
+            continue
+
+        hour = _extract_hourly_forecast_horizon(entry.entity_id, entry.original_name)
+        if hour is None:
+            current_entity_id = entry.entity_id
+        else:
+            forecast_candidates.append((hour, entry.entity_id))
+
+    forecast_candidates.sort(key=lambda item: item[0])
+    return DetectedSolarEntities(
+        current_entity_id=current_entity_id,
+        forecast_entity_ids=tuple(entity_id for _hour, entity_id in forecast_candidates),
+    )
+
+
+def _registry_entry_key(entry: er.RegistryEntry) -> str | None:
+    """Return the best semantic key for a registry entry."""
+    for candidate in (
+        getattr(entry, "translation_key", None),
+        getattr(entry, "original_name", None),
+        entry.entity_id,
+    ):
+        if not candidate:
+            continue
+        text = str(candidate).lower().replace("-", "_").replace(" ", "_")
+        if "solar_max" in text:
+            return "solar_max"
+        if "solar" in text:
+            return "solar"
+    return None
+
+
+def _extract_hourly_forecast_horizon(
+    entity_id: str | None, original_name: str | None
+) -> int | None:
+    """Extract the hourly forecast horizon from a Pirate Weather solar entity."""
+    patterns = []
+    if entity_id:
+        patterns.append(entity_id)
+    if original_name:
+        patterns.append(original_name)
+    for value in patterns:
+        match = re.search(r"[_ ](\d+)h(?:$|[_ ])", value)
+        if match is not None:
+            return int(match.group(1))
+    return None
 
 
 async def _async_weather_forecast(
@@ -398,6 +548,19 @@ def _coerce_state_temperature(state: State | None) -> float | None:
     if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
         return None
     return _coerce_float(state.state)
+
+
+def _coerce_outdoor_temperature(state: State | None) -> float | None:
+    """Coerce a sensor or weather state into a temperature value."""
+    if state is None:
+        return None
+    if state.entity_id.startswith(f"{WEATHER_DOMAIN}."):
+        for key in ("temperature", "native_temperature", "temp"):
+            value = _coerce_float(state.attributes.get(key))
+            if value is not None:
+                return value
+        return None
+    return _coerce_state_temperature(state)
 
 
 def _coerce_float(value: Any) -> float | None:

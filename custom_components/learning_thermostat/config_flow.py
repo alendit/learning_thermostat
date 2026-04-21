@@ -26,6 +26,7 @@ from .const import (
     CONF_LEARNING_RATE,
     CONF_MAX_TEMPERATURE,
     CONF_MIN_TEMPERATURE,
+    CONF_OUTDOOR_ENTITY_ID,
     CONF_OUTDOOR_TEMPERATURE_SENSOR_ENTITY_ID,
     CONF_TARGET_TEMPERATURE,
     CONF_TEMPERATURE_SENSOR_ENTITY_ID,
@@ -65,6 +66,7 @@ def _normalize_input(data: dict[str, Any]) -> dict[str, Any]:
         normalized[key] = float(data[key])
 
     for optional_key in (
+        CONF_OUTDOOR_ENTITY_ID,
         CONF_OUTDOOR_TEMPERATURE_SENSOR_ENTITY_ID,
         CONF_FORECAST_ENTITY_ID,
     ):
@@ -117,14 +119,14 @@ def _schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
                 selector.EntitySelectorConfig(domain=["sensor"])
             ),
             vol.Optional(
-                CONF_OUTDOOR_TEMPERATURE_SENSOR_ENTITY_ID,
-                default=defaults.get(CONF_OUTDOOR_TEMPERATURE_SENSOR_ENTITY_ID, ""),
-            ): selector.EntitySelector(
-                selector.EntitySelectorConfig(domain=["sensor"])
-            ),
-            vol.Optional(
-                CONF_FORECAST_ENTITY_ID,
-                default=defaults.get(CONF_FORECAST_ENTITY_ID, ""),
+                CONF_OUTDOOR_ENTITY_ID,
+                default=defaults.get(
+                    CONF_OUTDOOR_ENTITY_ID,
+                    defaults.get(
+                        CONF_OUTDOOR_TEMPERATURE_SENSOR_ENTITY_ID,
+                        defaults.get(CONF_FORECAST_ENTITY_ID, ""),
+                    ),
+                ),
             ): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain=["weather", "sensor"])
             ),

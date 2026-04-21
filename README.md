@@ -17,8 +17,9 @@ The first version intentionally supports only:
 - `climate` entity control
 - direct switch `turn_on` / `turn_off`
 - room temperature sensor input
-- optional outdoor temperature sensor input
-- optional weather forecast entity input
+- optional outdoor source via temperature sensor or weather entity
+- weather entities supply both current outdoor temperature and forecast temperatures
+- optional auto-detected solar input when the selected weather provider exposes linked irradiance sensors
 - persistent learning weights and migration from `versatile_thermostat`
 
 It intentionally does not include translation support, inverse switch behavior,

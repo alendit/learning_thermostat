@@ -40,6 +40,8 @@ class StubOptimizer:
         t_out: float,
         t_set: float,
         t_out_forecast: list[float],
+        solar: float | None,
+        solar_forecast: list[float],
         current_u: int,
         step_minutes: int,
         timestamp: float | None = None,
@@ -50,6 +52,8 @@ class StubOptimizer:
                 "t_out": t_out,
                 "t_set": t_set,
                 "t_out_forecast": t_out_forecast,
+                "solar": solar,
+                "solar_forecast": solar_forecast,
                 "current_u": current_u,
                 "step_minutes": step_minutes,
                 "timestamp": timestamp,
@@ -63,8 +67,8 @@ def _config() -> ThermostatConfig:
         name="Kitchen Floor",
         switch_entity_ids=("switch.floor_a", "switch.floor_b"),
         temperature_sensor_entity_id="sensor.kitchen_temperature",
-        outdoor_sensor_entity_id="sensor.outside_temperature",
-        forecast_entity_id="weather.home",
+        outdoor_entity_id="weather.home",
+        legacy_forecast_entity_id=None,
         cycle_minutes=15,
         min_temperature=15.0,
         max_temperature=28.0,
@@ -98,6 +102,8 @@ async def test_run_control_cycle_turns_switches_off_when_hvac_is_off() -> None:
     ran = await controller.run_control_cycle(
         force=False,
         forecast_temperatures=[],
+        solar=None,
+        solar_forecast=[],
         current_switch_active=True,
         turn_switches=turn_switches,
         persist=persist,
@@ -145,6 +151,8 @@ async def test_run_control_cycle_delegates_to_optimizer_and_persists_state() -> 
     ran = await controller.run_control_cycle(
         force=True,
         forecast_temperatures=[6.5, 6.0],
+        solar=120.0,
+        solar_forecast=[100.0, 80.0],
         current_switch_active=False,
         turn_switches=turn_switches,
         persist=persist,
@@ -157,6 +165,8 @@ async def test_run_control_cycle_delegates_to_optimizer_and_persists_state() -> 
             "t_out": 7.0,
             "t_set": 21.5,
             "t_out_forecast": [6.5, 6.0],
+            "solar": 120.0,
+            "solar_forecast": [100.0, 80.0],
             "current_u": 0,
             "step_minutes": 15,
             "timestamp": fixed_now.timestamp(),
@@ -177,6 +187,38 @@ async def test_run_control_cycle_delegates_to_optimizer_and_persists_state() -> 
     }
     assert controller.learning_last_tick == fixed_now
     assert controller.learning_on_percent == 1.0
+
+
+@pytest.mark.asyncio
+async def test_run_control_cycle_falls_back_to_forecast_outside_temperature_for_weather_source() -> None:
+    """Weather-backed entries should use the first forecast when no current outdoor value exists."""
+    fixed_now = datetime(2026, 4, 21, 12, 0, tzinfo=UTC)
+    optimizer = StubOptimizer()
+    controller = ThermostatController(
+        _config(),
+        optimizer_factory=lambda _name, _config: optimizer,
+        now=lambda: fixed_now,
+    )
+    controller.update_current_temperature(18.0)
+
+    async def turn_switches(_turn_on: bool) -> None:
+        return None
+
+    async def persist(_payload: dict) -> None:
+        return None
+
+    ran = await controller.run_control_cycle(
+        force=True,
+        forecast_temperatures=[6.5, 6.0],
+        solar=None,
+        solar_forecast=[],
+        current_switch_active=False,
+        turn_switches=turn_switches,
+        persist=persist,
+    )
+
+    assert ran is True
+    assert optimizer.tick_calls[0]["t_out"] == 6.5
 
 
 def test_reset_learning_preserves_history_without_debug_noise() -> None:

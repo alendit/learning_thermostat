@@ -29,6 +29,8 @@ class Optimizer(Protocol):
         t_out: float,
         t_set: float,
         t_out_forecast: list[float],
+        solar: float | None,
+        solar_forecast: list[float],
         current_u: int,
         step_minutes: int,
         timestamp: float | None = None,
@@ -53,8 +55,8 @@ class ThermostatConfig:
     name: str
     switch_entity_ids: tuple[str, ...]
     temperature_sensor_entity_id: str
-    outdoor_sensor_entity_id: str | None
-    forecast_entity_id: str | None
+    outdoor_entity_id: str | None
+    legacy_forecast_entity_id: str | None
     cycle_minutes: int
     min_temperature: float
     max_temperature: float
@@ -65,16 +67,23 @@ class ThermostatConfig:
     @classmethod
     def from_mapping(cls, *, name: str, data: dict[str, Any]) -> ThermostatConfig:
         """Build config from one config-entry payload."""
+        outdoor_entity_id = _coerce_optional_str(data.get("outdoor_entity_id"))
+        legacy_forecast_entity_id = _coerce_optional_str(data.get("forecast_entity_id"))
+        if outdoor_entity_id is None:
+            outdoor_entity_id = _coerce_optional_str(
+                data.get("outdoor_temperature_sensor_entity_id")
+            )
+        if outdoor_entity_id is None and legacy_forecast_entity_id and legacy_forecast_entity_id.startswith("weather."):
+            outdoor_entity_id = legacy_forecast_entity_id
+
         return cls(
             name=name,
             switch_entity_ids=tuple(
                 str(value) for value in data["underlying_entity_ids"]
             ),
             temperature_sensor_entity_id=str(data["temperature_sensor_entity_id"]),
-            outdoor_sensor_entity_id=_coerce_optional_str(
-                data.get("outdoor_temperature_sensor_entity_id")
-            ),
-            forecast_entity_id=_coerce_optional_str(data.get("forecast_entity_id")),
+            outdoor_entity_id=outdoor_entity_id,
+            legacy_forecast_entity_id=legacy_forecast_entity_id,
             cycle_minutes=int(data["cycle_minutes"]),
             min_temperature=float(data["min_temperature"]),
             max_temperature=float(data["max_temperature"]),
@@ -88,6 +97,7 @@ class ThermostatConfig:
                 "error_decay": float(data["learning_error_decay"]),
                 "learning_rate": float(data["learning_rate"]),
                 "w_energy": float(data["learning_energy"]),
+                "use_solar_feature": bool(data.get("solar_entity_id")),
             },
         )
 
@@ -112,6 +122,7 @@ class ThermostatController:
         self._learning_on_percent: float | None = None
         self._current_temperature: float | None = None
         self._outside_temperature: float | None = None
+        self._current_solar: float | None = None
         self._hvac_mode = HVACMode.HEAT
         self._target_temperature = config.target_temperature
 
@@ -155,6 +166,11 @@ class ThermostatController:
         """Return the current learning heating decision."""
         return self._learning_on_percent
 
+    @property
+    def current_solar(self) -> float | None:
+        """Return the current solar intensity."""
+        return self._current_solar
+
     def restore(
         self,
         *,
@@ -197,6 +213,10 @@ class ThermostatController:
     def update_outside_temperature(self, temperature: float | None) -> None:
         """Update the current outdoor temperature."""
         self._outside_temperature = temperature
+
+    def update_current_solar(self, solar: float | None) -> None:
+        """Update the current solar intensity."""
+        self._current_solar = solar
 
     def reset_learning(self, preserve_history: bool = True) -> None:
         """Reset persisted learning while keeping durable history when requested."""
@@ -245,6 +265,8 @@ class ThermostatController:
         *,
         force: bool,
         forecast_temperatures: list[float],
+        solar: float | None,
+        solar_forecast: list[float],
         current_switch_active: bool,
         turn_switches: SwitchWriter,
         persist: StatePersister,
@@ -277,6 +299,8 @@ class ThermostatController:
             outside_temperature,
             self._target_temperature,
             forecast_temperatures,
+            solar,
+            solar_forecast,
             current_u=1 if current_switch_active else 0,
             step_minutes=self.config.cycle_minutes,
             timestamp=now.timestamp(),
