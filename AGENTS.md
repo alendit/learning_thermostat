@@ -52,6 +52,9 @@ that does not directly support the focused thermostat behavior above.
 
 ## Architecture Guidance
 
+Use this section to evaluate decomposition, dependency direction, side-effect
+placement, interface design, and testability.
+
 - Separate the domain logic from Home Assistant integration glue.
 - Keep thermostat decision logic, learning behavior, and state handling in
   focused modules with clear responsibilities.
@@ -65,6 +68,32 @@ that does not directly support the focused thermostat behavior above.
 
 Before adding a new layer or interface, justify it with a concrete benefit in
 this repository, not with a hypothetical future need.
+
+### Hard Constraints
+
+- Keep core policy and decision logic isolated from side effects.
+- Keep dependencies flowing from unstable code toward stable code.
+- Do not mix unrelated domains into one coordinating component.
+- Prefer application services over putting business logic into entities,
+  config flow, service handlers, or other Home Assistant adapter code.
+- Do not introduce abstraction unless it makes a concrete likely change easier.
+- Do not create shared interfaces that implementations can only satisfy by
+  narrowing behavior, ignoring requirements, or throwing.
+
+### Required Self-Check For Design-Sensitive Changes
+
+For design-sensitive changes, include these review questions in the final note,
+PR description, or equivalent handoff:
+
+1. What component owns this behavior, and why?
+2. Does this change increase or reduce coupling?
+3. Did any dependency start pointing the wrong way?
+4. Could any side effect be moved outward into an adapter or shell?
+5. Are the abstractions semantically real?
+6. Does any interface force an implementation to ignore, narrow, or reject
+   required behavior?
+7. What is the next likely change this makes easier?
+8. What tests prove the core behavior independently of the full system?
 
 ## Development Workflow
 
