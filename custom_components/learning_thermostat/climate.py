@@ -485,9 +485,9 @@ def _registry_entry_key(entry: er.RegistryEntry) -> str | None:
         if not candidate:
             continue
         text = str(candidate).lower().replace("-", "_").replace(" ", "_")
-        if "solar_max" in text:
+        if "solar_max" in text or "downward_short_wave_radiation_flux_max" in text:
             return "solar_max"
-        if "solar" in text:
+        if "solar" in text or "downward_short_wave_radiation_flux" in text:
             return "solar"
     return None
 

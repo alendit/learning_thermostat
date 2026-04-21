@@ -265,3 +265,55 @@ async def test_detect_pirate_weather_solar_entities(hass) -> None:
         "sensor.home_solar_1h",
         "sensor.home_solar_2h",
     ]
+
+
+async def test_detect_pirate_weather_live_entity_names(hass) -> None:
+    """Pirate Weather auto-detection should recognize the live irradiance entity names."""
+    pirate_entry = MockConfigEntry(domain="pirateweather", title="Pirate Weather")
+    pirate_entry.add_to_hass(hass)
+
+    registry = er.async_get(hass)
+    weather_entry = registry.async_get_or_create(
+        "weather",
+        "pirateweather",
+        "weather-live-unique",
+        config_entry=pirate_entry,
+        object_id_base="pirateweather",
+        original_name="PirateWeather",
+    )
+    registry.async_get_or_create(
+        "sensor",
+        "pirateweather",
+        "solar-current-live",
+        config_entry=pirate_entry,
+        object_id_base="pirateweather_downward_short_wave_radiation_flux",
+        original_name="PirateWeather Downward Short-Wave Radiation Flux",
+    )
+    registry.async_get_or_create(
+        "sensor",
+        "pirateweather",
+        "solar-1h-live",
+        config_entry=pirate_entry,
+        object_id_base="pirateweather_downward_short_wave_radiation_flux_1h",
+        original_name="PirateWeather Downward Short-Wave Radiation Flux 1h",
+    )
+    registry.async_get_or_create(
+        "sensor",
+        "pirateweather",
+        "solar-max-live",
+        config_entry=pirate_entry,
+        object_id_base="pirateweather_downward_short_wave_radiation_flux_max",
+        original_name="PirateWeather Downward Short-Wave Radiation Flux Max",
+    )
+
+    detected = climate_module._detect_pirate_weather_solar_entities(
+        hass, weather_entry.entity_id
+    )
+
+    assert (
+        detected.current_entity_id
+        == "sensor.pirateweather_downward_short_wave_radiation_flux"
+    )
+    assert list(detected.forecast_entity_ids) == [
+        "sensor.pirateweather_downward_short_wave_radiation_flux_1h",
+    ]
