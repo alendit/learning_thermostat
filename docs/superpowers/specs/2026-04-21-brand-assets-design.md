@@ -34,8 +34,8 @@ logo in the UI without depending on the external brands repository.
 - Source assets live in `assets/brand/` as SVG files.
 - Rendered Home Assistant assets live in
   `custom_components/learning_thermostat/brand/`.
-- A small generator script owns both the SVG source output and PNG export so
-  future tweaks do not require hand-editing multiple raster files.
+- The SVG files are the canonical editable assets.
+- The PNG files are tracked runtime outputs used directly by Home Assistant.
 
 ## Verification
 

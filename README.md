@@ -10,6 +10,18 @@ This repository contains:
 - `scripts/`: CI, deploy, and migration utilities
 - `.drone.yml`: local Drone pipeline
 
+## Branding Assets
+
+Brand assets use this ownership model:
+
+- `assets/brand/*.svg`: editable source assets
+- `custom_components/learning_thermostat/brand/*.png`: tracked runtime assets
+
+Home Assistant reads the PNG files from the integration `brand/` directory.
+When branding changes, update the SVG source assets first and then refresh the
+PNG files in `custom_components/learning_thermostat/brand/` from those source
+files.
+
 ## Scope
 
 The first version intentionally supports only:
