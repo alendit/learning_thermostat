@@ -8,8 +8,14 @@ from PIL import Image, ImageDraw, ImageFont
 ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = ROOT / "assets" / "brand"
 OUT_DIR = ROOT / "custom_components" / "learning_thermostat" / "brand"
-FONT_BOLD = "/System/Library/Fonts/Supplemental/Futura.ttc"
-FONT_BODY = "/System/Library/Fonts/Supplemental/GillSans.ttc"
+FONT_BOLD_CANDIDATES = (
+    "DejaVuSans-Bold.ttf",
+    "/System/Library/Fonts/Supplemental/Futura.ttc",
+)
+FONT_BODY_CANDIDATES = (
+    "DejaVuSans.ttf",
+    "/System/Library/Fonts/Supplemental/GillSans.ttc",
+)
 
 
 @dataclass(frozen=True)
@@ -52,8 +58,13 @@ def ensure_dirs() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def load_font(path: str, size: int) -> ImageFont.FreeTypeFont:
-    return ImageFont.truetype(path, size=size)
+def load_font(candidates: tuple[str, ...], size: int) -> ImageFont.FreeTypeFont:
+    for candidate in candidates:
+        try:
+            return ImageFont.truetype(candidate, size=size)
+        except OSError:
+            continue
+    return ImageFont.load_default(size=size)
 
 
 def book_svg(theme: Theme) -> str:
@@ -160,8 +171,8 @@ def render_logo(theme: Theme, width: int, height: int) -> Image.Image:
     img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw_mark(img, theme, (0, 5), 0.95)
     draw = ImageDraw.Draw(img)
-    learning_font = load_font(FONT_BOLD, 44)
-    thermostat_font = load_font(FONT_BODY, 38)
+    learning_font = load_font(FONT_BOLD_CANDIDATES, 44)
+    thermostat_font = load_font(FONT_BODY_CANDIDATES, 38)
     draw.text((146, 34), "Learning", font=learning_font, fill=theme.text_primary)
     draw.text((146, 78), "Thermostat", font=thermostat_font, fill=theme.text_secondary)
     return img
