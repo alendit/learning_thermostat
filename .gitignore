@@ -5,5 +5,3 @@ __pycache__/
 dist/
 .superpowers/
 .DS_Store
-node_modules/
-.npm-cache/
