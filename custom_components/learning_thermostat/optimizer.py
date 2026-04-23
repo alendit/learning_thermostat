@@ -22,6 +22,13 @@ import logging
 import time
 import numpy as np
 
+from .solar import (
+    SOLAR_PROFILE_BIN_AZIMUTHS,
+    SOLAR_PROFILE_SIZE,
+    coerce_solar_profile,
+    diffuse_only_profile,
+)
+
 DYNAMIC_LOOKAHEAD_MIN = 12
 DYNAMIC_LOOKAHEAD_MAX = 24
 DYNAMIC_LOOKAHEAD_TOLERANCE = 0.2
@@ -90,7 +97,7 @@ class LearningSwitchOptimizer:
         self._weights_init = self._config.get("weights_init")
         # Whether the model includes a solar irradiance feature channel.
         self._use_solar_feature = bool(self._config.get("use_solar_feature"))
-        # Current model weights, shape: (groups * history_steps + 1,) = [t_hist, out_hist, (solar_hist), u_hist, bias].
+        # Current model weights, shape: [t_hist, out_hist, (solar_profile_hist), u_hist, bias].
         self._weights = self._init_weights(self._weights_init)
         # Recent room temperatures (latest first).
         self._t_hist: list[float] = []
@@ -98,6 +105,8 @@ class LearningSwitchOptimizer:
         self._out_hist: list[float] = []
         # Recent solar irradiance values (latest first).
         self._solar_hist: list[float] = []
+        # Recent solar exposure profile values (latest first).
+        self._solar_profile_hist: list[list[float]] = []
         # Recent on/off states (latest first).
         self._u_hist: list[int] = []
         # Last planned on/off state.
@@ -141,17 +150,22 @@ class LearningSwitchOptimizer:
         self._last_plan: dict[str, int | None] = {"start_step": None, "stop_step": None}
         self._warned_invalid_weights = False
 
+    def _model_name(self) -> str:
+        """Return the current persisted model identifier."""
+        return (
+            "delta_zscore_solar_profile" if self._use_solar_feature else "delta_zscore"
+        )
+
     def snapshot_state(self) -> dict:
         """Serialize weights and history for persistence/debugging."""
         return {
             "weights": self._weights.tolist(),
-            "model": (
-                "delta_zscore_solar" if self._use_solar_feature else "delta_zscore"
-            ),
+            "model": self._model_name(),
             "history": {
                 "t_room": list(self._t_hist),
                 "t_out": list(self._out_hist),
                 "solar": list(self._solar_hist),
+                "solar_profile": [list(row) for row in self._solar_profile_hist],
                 "u": list(self._u_hist),
                 "pred_next": list(self._prev_pred_history),
                 "pred_abs_error": list(self._prev_abs_error_history),
@@ -189,6 +203,7 @@ class LearningSwitchOptimizer:
                 "default_u_gain_per_hour": self._default_u_gain_per_hour,
                 "use_solar_feature": self._use_solar_feature,
             },
+            "solar_orientation": self.solar_orientation_diagnostics(),
         }
 
     def restore_state(self, state: dict | None) -> None:
@@ -198,11 +213,18 @@ class LearningSwitchOptimizer:
                 return
 
             model_type = state.get("model")
-            model_matches = model_type in {"delta_zscore", "delta_zscore_solar"}
+            model_matches = model_type in {
+                "delta_zscore",
+                "delta_zscore_solar",
+                "delta_zscore_solar_profile",
+            }
             weights = state.get("weights")
             if model_matches and weights is not None:
                 restored = np.array([float(v) for v in weights], dtype=float)
-                if restored.size == self._weights.size:
+                if (
+                    restored.size == self._weights.size
+                    and model_type == self._model_name()
+                ):
                     if np.allclose(restored, 0.0) or not np.all(np.isfinite(restored)):
                         restored = self._init_weights(self._weights_init)
                     self._weights = restored
@@ -223,6 +245,13 @@ class LearningSwitchOptimizer:
             self._solar_hist = self._coerce_float_list(history.get("solar"))[
                 : self._history_steps
             ]
+            self._solar_profile_hist = self._coerce_solar_profile_history(
+                history.get("solar_profile")
+            )[: self._history_steps]
+            if self._use_solar_feature and not self._solar_profile_hist:
+                self._solar_profile_hist = [
+                    list(diffuse_only_profile(value)) for value in self._solar_hist
+                ][: self._history_steps]
             self._u_hist = self._coerce_int_list(history.get("u"))[
                 : self._history_steps
             ]
@@ -287,35 +316,39 @@ class LearningSwitchOptimizer:
         size = restored.size
         if size < 4:
             return None
-        old_group_count = self._infer_group_count(model_type, size)
-        if old_group_count is None:
+        old_layout = self._infer_weight_layout(model_type, size)
+        if old_layout is None:
             return None
-        old_steps = int((size - 1) / old_group_count)
+        old_steps, old_profile_size = old_layout
         if old_steps <= 0:
             return None
         new_steps = self._history_steps
-        new_group_count = self._feature_group_count()
-        new_weights = np.zeros(new_group_count * new_steps + 1, dtype=float)
+        new_profile_size = self._solar_profile_size()
+        new_weights = np.zeros(self._feature_size() + 1, dtype=float)
         copy_len = min(old_steps, new_steps)
-        semantic_order_old = ["t_room", "t_out"]
-        if old_group_count == 4:
-            semantic_order_old.append("solar")
-        semantic_order_old.append("u")
-        semantic_order_new = ["t_room", "t_out"]
-        if new_group_count == 4:
-            semantic_order_new.append("solar")
-        semantic_order_new.append("u")
 
-        old_group_index = {key: idx for idx, key in enumerate(semantic_order_old)}
-        new_group_index = {key: idx for idx, key in enumerate(semantic_order_new)}
-        for key in ("t_room", "t_out", "solar", "u"):
-            if key not in old_group_index or key not in new_group_index:
-                continue
-            start_old = old_group_index[key] * old_steps
-            end_old = start_old + copy_len
-            start_new = new_group_index[key] * new_steps
-            end_new = start_new + copy_len
-            new_weights[start_new:end_new] = restored[start_old:end_old]
+        new_weights[0:copy_len] = restored[0:copy_len]
+        old_out_start = old_steps
+        new_out_start = new_steps
+        new_weights[new_out_start : new_out_start + copy_len] = restored[
+            old_out_start : old_out_start + copy_len
+        ]
+
+        old_solar_start = old_steps * 2
+        new_solar_start = new_steps * 2
+        old_u_start = old_solar_start + old_steps * old_profile_size
+        new_u_start = new_solar_start + new_steps * new_profile_size
+        if old_profile_size and new_profile_size:
+            profile_copy = min(old_profile_size, new_profile_size)
+            for step in range(copy_len):
+                old_start = old_solar_start + step * old_profile_size
+                new_start = new_solar_start + step * new_profile_size
+                new_weights[new_start : new_start + profile_copy] = restored[
+                    old_start : old_start + profile_copy
+                ]
+        new_weights[new_u_start : new_u_start + copy_len] = restored[
+            old_u_start : old_u_start + copy_len
+        ]
         bias = restored[-1]
         if np.isfinite(bias):
             new_weights[-1] = float(bias)
@@ -323,21 +356,37 @@ class LearningSwitchOptimizer:
             return None
         return new_weights
 
-    def _infer_group_count(self, model_type: str | None, size: int) -> int | None:
-        """Infer feature-group count from the saved model metadata."""
+    def _infer_weight_layout(
+        self, model_type: str | None, size: int
+    ) -> tuple[int, int] | None:
+        """Infer (history steps, solar profile size) from saved model metadata."""
         if model_type == "delta_zscore":
-            return 3 if (size - 1) % 3 == 0 else None
+            return ((size - 1) // 3, 0) if (size - 1) % 3 == 0 else None
         if model_type == "delta_zscore_solar":
-            return 4 if (size - 1) % 4 == 0 else None
-        if (size - 1) % 4 == 0:
-            return 4
+            return ((size - 1) // 4, 1) if (size - 1) % 4 == 0 else None
+        if model_type == "delta_zscore_solar_profile":
+            group_count = 3 + SOLAR_PROFILE_SIZE
+            return (
+                ((size - 1) // group_count, SOLAR_PROFILE_SIZE)
+                if (size - 1) % group_count == 0
+                else None
+            )
+        group_count = 3 + SOLAR_PROFILE_SIZE
+        if (size - 1) % group_count == 0:
+            return ((size - 1) // group_count, SOLAR_PROFILE_SIZE)
         if (size - 1) % 3 == 0:
-            return 3
+            return ((size - 1) // 3, 0)
+        if (size - 1) % 4 == 0:
+            return ((size - 1) // 4, 1)
         return None
 
-    def _feature_group_count(self) -> int:
-        """Return the number of feature history groups in the model."""
-        return 4 if self._use_solar_feature else 3
+    def _solar_profile_size(self) -> int:
+        """Return the number of solar features per history step."""
+        return SOLAR_PROFILE_SIZE if self._use_solar_feature else 0
+
+    def _feature_size(self) -> int:
+        """Return the feature vector size without the bias term."""
+        return self._history_steps * (3 + self._solar_profile_size())
 
     def _init_weights(self, weights_init) -> np.ndarray:
         """Build initial weights, optionally seeded by configuration."""
@@ -352,7 +401,7 @@ class LearningSwitchOptimizer:
 
     def _default_weights(self) -> np.ndarray:
         """Return default linear model weights."""
-        size = self._feature_group_count() * self._history_steps + 1
+        size = self._feature_size() + 1
         return np.zeros(size, dtype=float)
 
     def _ensure_weights_finite(self) -> bool:
@@ -382,7 +431,7 @@ class LearningSwitchOptimizer:
         delta = self._default_u_gain_per_hour * (minutes / 60.0)
         if not np.isfinite(delta):
             return False
-        u_index = self._history_steps * (3 if self._use_solar_feature else 2)
+        u_index = self._u_weight_start()
         if u_index < self._weights.size:
             self._weights[u_index] = float(delta)
             return True
@@ -390,7 +439,7 @@ class LearningSwitchOptimizer:
 
     def _cap_u_weights(self) -> bool:
         """Clamp on/off weights to a small positive minimum."""
-        start = self._history_steps * (3 if self._use_solar_feature else 2)
+        start = self._u_weight_start()
         end = start + self._history_steps
         if start >= self._weights.size:
             return False
@@ -400,6 +449,12 @@ class LearningSwitchOptimizer:
         before = self._weights[start:end].copy()
         self._weights[start:end] = np.maximum(self._weights[start:end], floor)
         return not np.allclose(before, self._weights[start:end], rtol=0.0, atol=1e-12)
+
+    def _u_weight_start(self) -> int:
+        """Return the start index of the heating-control weights."""
+        return (
+            self._history_steps * 2 + self._history_steps * self._solar_profile_size()
+        )
 
     def _coerce_int(self, value, default: int) -> int:
         try:
@@ -425,6 +480,18 @@ class LearningSwitchOptimizer:
                 out.append(float(value))
             except (TypeError, ValueError):
                 continue
+        return out
+
+    def _coerce_solar_profile_history(self, values) -> list[list[float]]:
+        """Coerce persisted solar profile history rows."""
+        if not isinstance(values, (list, tuple)):
+            return []
+        out: list[list[float]] = []
+        for value in values:
+            if not isinstance(value, (list, tuple)):
+                continue
+            profile = coerce_solar_profile(value)
+            out.append(list(profile))
         return out
 
     def _coerce_int_list(self, values) -> list[int]:
@@ -664,7 +731,12 @@ class LearningSwitchOptimizer:
         return min_steps, reason
 
     def _update_history(
-        self, t_room: float, t_out: float, u_actual: int, solar: float | None
+        self,
+        t_room: float,
+        t_out: float,
+        u_actual: int,
+        solar: float | None,
+        solar_profile: list[float] | tuple[float, ...] | None,
     ) -> None:
         """Maintain fixed-length history buffers for model inputs."""
         self._t_hist.insert(0, float(t_room))
@@ -675,6 +747,8 @@ class LearningSwitchOptimizer:
             else:
                 solar_value = float(solar)
             self._solar_hist.insert(0, solar_value)
+            profile_value = coerce_solar_profile(solar_profile, solar_value)
+            self._solar_profile_hist.insert(0, list(profile_value))
         self._u_hist.insert(0, int(u_actual))
         if len(self._t_hist) > self._history_steps:
             self._t_hist = self._t_hist[: self._history_steps]
@@ -682,6 +756,8 @@ class LearningSwitchOptimizer:
             self._out_hist = self._out_hist[: self._history_steps]
         if len(self._solar_hist) > self._history_steps:
             self._solar_hist = self._solar_hist[: self._history_steps]
+        if len(self._solar_profile_hist) > self._history_steps:
+            self._solar_profile_hist = self._solar_profile_hist[: self._history_steps]
         if len(self._u_hist) > self._history_steps:
             self._u_hist = self._u_hist[: self._history_steps]
 
@@ -706,9 +782,20 @@ class LearningSwitchOptimizer:
         )
         solar_pad: np.ndarray | None = None
         if self._use_solar_feature:
-            solar_pad = self._pad_sequence(
-                self._solar_hist, self._solar_hist[-1] if self._solar_hist else 0.0
-            )
+            profile_rows = self._solar_profile_hist
+            if not profile_rows and self._solar_hist:
+                profile_rows = [
+                    list(diffuse_only_profile(value)) for value in self._solar_hist
+                ]
+            if profile_rows:
+                rows = [list(coerce_solar_profile(row)) for row in profile_rows]
+                if len(rows) < self._history_steps:
+                    rows.extend([rows[-1]] * (self._history_steps - len(rows)))
+                solar_pad = np.array(rows[: self._history_steps], dtype=float)
+            else:
+                solar_pad = np.zeros(
+                    (self._history_steps, SOLAR_PROFILE_SIZE), dtype=float
+                )
         u_pad = self._pad_sequence([float(v) for v in self._u_hist], 0.0)
         return (
             self._sanitize_array(t_pad),
@@ -742,12 +829,22 @@ class LearningSwitchOptimizer:
         out_norm = (out_hist - out_mean) / out_std
         solar_norm: np.ndarray | None = None
         if solar_hist is not None:
-            solar_mean = float(np.mean(solar_hist)) if solar_hist.size else 0.0
-            solar_std = float(np.std(solar_hist)) if solar_hist.size else 1.0
-            if not np.isfinite(solar_mean):
-                solar_mean = 0.0
-            if not np.isfinite(solar_std) or solar_std < Z_SCORE_MIN_STD:
-                solar_std = Z_SCORE_MIN_STD
+            solar_mean = (
+                np.mean(solar_hist, axis=0)
+                if solar_hist.size
+                else np.zeros(SOLAR_PROFILE_SIZE, dtype=float)
+            )
+            solar_std = (
+                np.std(solar_hist, axis=0)
+                if solar_hist.size
+                else np.ones(SOLAR_PROFILE_SIZE, dtype=float)
+            )
+            solar_mean = np.where(np.isfinite(solar_mean), solar_mean, 0.0)
+            solar_std = np.where(
+                np.isfinite(solar_std) & (solar_std >= Z_SCORE_MIN_STD),
+                solar_std,
+                Z_SCORE_MIN_STD,
+            )
             solar_norm = (solar_hist - solar_mean) / solar_std
         return (
             self._sanitize_array(t_norm),
@@ -777,7 +874,8 @@ class LearningSwitchOptimizer:
         out_hist = out_hist * decay
         parts = [t_hist, out_hist]
         if solar_hist is not None:
-            parts.append(solar_hist * decay)
+            solar_decay = np.repeat(decay, SOLAR_PROFILE_SIZE)
+            parts.append(solar_hist.reshape(-1) * solar_decay)
         u_hist = u_hist * decay
         parts.extend((u_hist, np.array([1.0], dtype=float)))
         return np.concatenate(parts)
@@ -789,7 +887,7 @@ class LearningSwitchOptimizer:
         solar_hist: np.ndarray | None,
         u_hist: np.ndarray,
         u_value: int,
-        solar_value: float | None,
+        solar_value: list[float] | tuple[float, ...] | np.ndarray | float | None,
     ) -> tuple[float, np.ndarray]:
         """Predict next room temperature for a single step and return features."""
         u_hist_step = np.concatenate(
@@ -797,13 +895,15 @@ class LearningSwitchOptimizer:
         )
         solar_hist_step: np.ndarray | None = None
         if solar_hist is not None:
-            solar_step = (
-                float(solar_value)
-                if solar_value is not None and np.isfinite(float(solar_value))
-                else float(solar_hist[0])
+            solar_step = np.array(
+                coerce_solar_profile(
+                    solar_value,
+                    solar_hist[0][0] if solar_hist.size else 0.0,
+                ),
+                dtype=float,
             )
             solar_hist_step = np.concatenate(
-                (np.array([solar_step], dtype=float), solar_hist[:-1])
+                (solar_step.reshape(1, SOLAR_PROFILE_SIZE), solar_hist[:-1])
             )
         t_feat, out_feat, solar_feat, u_feat = self._transform_histories(
             t_hist, out_hist, solar_hist_step, u_hist_step
@@ -831,7 +931,7 @@ class LearningSwitchOptimizer:
         solar_hist_step: np.ndarray | None = None
         if solar_hist is not None:
             solar_hist_step = np.concatenate(
-                (np.array([float(solar_hist[0])], dtype=float), solar_hist[:-1])
+                (solar_hist[0].reshape(1, SOLAR_PROFILE_SIZE), solar_hist[:-1])
             )
         t_feat, out_feat, solar_feat, u_feat = self._transform_histories(
             t_hist, out_hist, solar_hist_step, u_hist_step
@@ -843,6 +943,41 @@ class LearningSwitchOptimizer:
             return np.zeros_like(self._weights)
         return np.abs(x * self._weights)
 
+    def solar_orientation_diagnostics(self) -> dict:
+        """Return the dominant learned solar exposure direction."""
+        exposure_bins = {azimuth: 0.0 for azimuth in SOLAR_PROFILE_BIN_AZIMUTHS}
+        if not self._use_solar_feature:
+            return {
+                "azimuth": None,
+                "confidence": None,
+                "exposure_bins": exposure_bins,
+            }
+
+        solar_start = self._history_steps * 2
+        for step in range(self._history_steps):
+            row_start = solar_start + step * SOLAR_PROFILE_SIZE
+            for bin_index, azimuth in enumerate(SOLAR_PROFILE_BIN_AZIMUTHS, start=1):
+                weight_index = row_start + bin_index
+                if weight_index >= self._weights.size:
+                    continue
+                weight = float(self._weights[weight_index])
+                if np.isfinite(weight) and weight > 0.0:
+                    exposure_bins[azimuth] += weight
+
+        total = sum(exposure_bins.values())
+        if total <= 0.0:
+            return {
+                "azimuth": None,
+                "confidence": None,
+                "exposure_bins": exposure_bins,
+            }
+        azimuth = max(exposure_bins, key=exposure_bins.get)
+        return {
+            "azimuth": azimuth,
+            "confidence": exposure_bins[azimuth] / total,
+            "exposure_bins": exposure_bins,
+        }
+
     def _rollout(
         self,
         t_hist: np.ndarray,
@@ -850,7 +985,7 @@ class LearningSwitchOptimizer:
         solar_hist: np.ndarray | None,
         u_hist: np.ndarray,
         t_outs: list[float],
-        solar_forecast: list[float],
+        solar_forecast: list[list[float]],
         start: int,
         stop: int,
         steps: int,
@@ -888,13 +1023,15 @@ class LearningSwitchOptimizer:
                 (np.array([float(t_outs[idx])], dtype=float), out_hist_cur[:-1])
             )
             if solar_hist_cur is not None:
-                next_solar = (
-                    float(solar_value)
-                    if solar_value is not None
-                    else float(solar_hist_cur[0])
+                next_solar = np.array(
+                    coerce_solar_profile(
+                        solar_value,
+                        solar_hist_cur[0][0] if solar_hist_cur.size else 0.0,
+                    ),
+                    dtype=float,
                 )
                 solar_hist_cur = np.concatenate(
-                    (np.array([next_solar], dtype=float), solar_hist_cur[:-1])
+                    (next_solar.reshape(1, SOLAR_PROFILE_SIZE), solar_hist_cur[:-1])
                 )
             u_hist_cur = np.concatenate(
                 (np.array([float(u)], dtype=float), u_hist_cur[:-1])
@@ -910,7 +1047,7 @@ class LearningSwitchOptimizer:
         u_hist: np.ndarray,
         t_set: float,
         t_outs: list[float],
-        solar_forecast: list[float],
+        solar_forecast: list[list[float]],
         start: int,
         stop: int,
     ) -> tuple[float, list[float]]:
@@ -954,7 +1091,7 @@ class LearningSwitchOptimizer:
         u_hist: np.ndarray,
         t_set: float,
         t_outs: list[float],
-        solar_forecast: list[float],
+        solar_forecast: list[list[float]],
     ) -> tuple[int, int, float]:
         """Search all start/stop pairs for a single ON interval to minimize cost."""
         # Optimization idea (not implemented): for each start, batch all stop candidates
@@ -1023,38 +1160,42 @@ class LearningSwitchOptimizer:
         return temps
 
     def _build_solar_forecast(
-        self, solar: float | None, solar_forecast: list[float] | None, steps: int
-    ) -> list[float]:
+        self,
+        solar: float | None,
+        solar_forecast: list[float] | None,
+        solar_profile: list[float] | tuple[float, ...] | None,
+        solar_profile_forecast: list[list[float]] | None,
+        steps: int,
+    ) -> list[list[float]]:
         """Normalize solar forecast input to the lookahead length with fallbacks."""
         if not self._use_solar_feature or steps <= 0:
             return []
 
-        values: list[float] = []
-        if isinstance(solar_forecast, list) and solar_forecast:
+        values: list[list[float]] = []
+        if isinstance(solar_profile_forecast, list) and solar_profile_forecast:
+            for value in solar_profile_forecast:
+                profile = coerce_solar_profile(value)
+                values.append(list(profile))
+
+        if not values and isinstance(solar_forecast, list) and solar_forecast:
             for value in solar_forecast:
-                try:
-                    solar_val = float(value)
-                except (TypeError, ValueError):
-                    continue
-                if not np.isfinite(solar_val):
-                    continue
-                values.append(solar_val)
+                values.append(list(diffuse_only_profile(value)))
 
         if not values:
-            if solar is not None and np.isfinite(float(solar)):
-                solar_current = float(solar)
-                values = [solar_current] * steps
+            current_profile = coerce_solar_profile(solar_profile, solar)
+            if any(current_profile):
+                values = [list(current_profile)] * steps
             elif self._last_forecast_solar is not None:
-                values = [self._last_forecast_solar] * steps
+                values = [list(diffuse_only_profile(self._last_forecast_solar))] * steps
             else:
-                values = [0.0] * steps
+                values = [list(diffuse_only_profile(0.0))] * steps
         elif len(values) < steps:
-            values.extend([values[-1]] * (steps - len(values)))
+            values.extend([list(values[-1])] * (steps - len(values)))
         elif len(values) > steps:
             values = values[:steps]
 
         if values:
-            self._last_forecast_solar = values[-1]
+            self._last_forecast_solar = values[-1][0]
         return values
 
     def _compute_update(
@@ -1222,6 +1363,8 @@ class LearningSwitchOptimizer:
         t_out_forecast: list[float] | None,
         solar: float | None = None,
         solar_forecast: list[float] | None = None,
+        solar_profile: list[float] | tuple[float, ...] | None = None,
+        solar_profile_forecast: list[list[float]] | None = None,
         current_u: int | None = None,
         step_minutes: int | None = None,
         timestamp: float | None = None,
@@ -1261,7 +1404,14 @@ class LearningSwitchOptimizer:
             if solar_current is not None and not np.isfinite(solar_current):
                 solar_current = None
 
-        self._update_history(t_room, t_out, u_actual, solar_current)
+        current_solar_profile = (
+            coerce_solar_profile(solar_profile, solar_current)
+            if self._use_solar_feature
+            else None
+        )
+        self._update_history(
+            t_room, t_out, u_actual, solar_current, current_solar_profile
+        )
         t_hist, out_hist, solar_hist, u_hist = self._history_arrays()
 
         configured_steps = self._coerce_int(
@@ -1301,9 +1451,14 @@ class LearningSwitchOptimizer:
         t_outs_max = self._build_forecast(t_out, t_out_forecast, max_steps)
         t_outs = t_outs_max[:steps]
         solar_outs_max = self._build_solar_forecast(
-            solar_current, solar_forecast, max_steps
+            solar_current,
+            solar_forecast,
+            current_solar_profile,
+            solar_profile_forecast,
+            max_steps,
         )
         solar_outs = solar_outs_max[:steps]
+        solar_outs_raw = [value[0] for value in solar_outs]
 
         prev_pred = self._prev_pred_history[0] if self._prev_pred_history else None
         abs_error = None
@@ -1478,10 +1633,10 @@ class LearningSwitchOptimizer:
 
         theta_outside = None
         theta_inside = None
-        u_group_index = 3 if self._use_solar_feature else 2
-        if self._weights.size >= self._history_steps * (u_group_index + 1):
+        u_group_index = self._u_weight_start()
+        if self._weights.size >= u_group_index + self._history_steps:
             theta_outside = float(self._weights[self._history_steps])
-            theta_inside = float(self._weights[self._history_steps * u_group_index])
+            theta_inside = float(self._weights[u_group_index])
 
         error = update.get("error") if isinstance(update, dict) else None
 
@@ -1515,7 +1670,8 @@ class LearningSwitchOptimizer:
             "lookahead_steps": steps,
             "step_minutes": step_minutes,
             "forecast_temps": t_outs,
-            "forecast_solar": solar_outs,
+            "forecast_solar": solar_outs_raw,
+            "forecast_solar_profile": solar_outs,
             "predicted_temps": preds_next,
             "planned_states": planned_states,
             "plan_cost": plan_cost,

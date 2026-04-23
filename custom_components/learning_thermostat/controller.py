@@ -31,6 +31,8 @@ class Optimizer(Protocol):
         t_out_forecast: list[float],
         solar: float | None,
         solar_forecast: list[float],
+        solar_profile: list[float] | None,
+        solar_profile_forecast: list[list[float]],
         current_u: int,
         step_minutes: int,
         timestamp: float | None = None,
@@ -127,6 +129,7 @@ class ThermostatController:
         self._current_temperature: float | None = None
         self._outside_temperature: float | None = None
         self._current_solar: float | None = None
+        self._current_solar_profile: list[float] | None = None
         self._hvac_mode = HVACMode.HEAT
         self._target_temperature = config.target_temperature
 
@@ -175,6 +178,24 @@ class ThermostatController:
         """Return the current solar intensity."""
         return self._current_solar
 
+    @property
+    def current_solar_profile(self) -> list[float] | None:
+        """Return the current directional solar profile."""
+        return self._current_solar_profile
+
+    @property
+    def solar_orientation_diagnostics(self) -> dict[str, Any]:
+        """Return optimizer-provided solar orientation diagnostics."""
+        if self._optimizer is not None and hasattr(
+            self._optimizer, "solar_orientation_diagnostics"
+        ):
+            return self._optimizer.solar_orientation_diagnostics()
+        state = self._learning_state or {}
+        diagnostics = state.get("solar_orientation")
+        if isinstance(diagnostics, dict):
+            return diagnostics
+        return {"azimuth": None, "confidence": None, "exposure_bins": {}}
+
     def restore(
         self,
         *,
@@ -218,9 +239,12 @@ class ThermostatController:
         """Update the current outdoor temperature."""
         self._outside_temperature = temperature
 
-    def update_current_solar(self, solar: float | None) -> None:
+    def update_current_solar(
+        self, solar: float | None, solar_profile: list[float] | None = None
+    ) -> None:
         """Update the current solar intensity."""
         self._current_solar = solar
+        self._current_solar_profile = solar_profile
 
     def reset_learning(self, preserve_history: bool = True) -> None:
         """Reset persisted learning while keeping durable history when requested."""
@@ -271,6 +295,8 @@ class ThermostatController:
         forecast_temperatures: list[float],
         solar: float | None,
         solar_forecast: list[float],
+        solar_profile: list[float] | None,
+        solar_profile_forecast: list[list[float]],
         current_switch_active: bool,
         turn_switches: SwitchWriter,
         persist: StatePersister,
@@ -305,6 +331,8 @@ class ThermostatController:
             forecast_temperatures,
             solar,
             solar_forecast,
+            solar_profile,
+            solar_profile_forecast,
             current_u=1 if current_switch_active else 0,
             step_minutes=self.config.cycle_minutes,
             timestamp=now.timestamp(),

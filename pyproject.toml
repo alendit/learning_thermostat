@@ -22,5 +22,9 @@ dev = [
 line-length = 88
 target-version = ["py313"]
 
+[tool.setuptools.packages.find]
+include = ["custom_components*"]
+namespaces = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

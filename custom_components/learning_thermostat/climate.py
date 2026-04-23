@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 import re
 from typing import Any
 
@@ -43,6 +43,7 @@ from homeassistant.helpers.event import (
     async_track_time_interval,
 )
 from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.util import dt as dt_util
 
 from .const import (
     DATA_SERVICES_REGISTERED,
@@ -53,7 +54,17 @@ from .const import (
     SERVICE_TRIGGER_TICK,
 )
 from .controller import ThermostatConfig, ThermostatController
+from .solar import build_solar_profile
 from .storage import LearningEntryPayload, LearningStateStore
+
+try:
+    from astral import Observer
+    from astral.sun import azimuth as astral_azimuth
+    from astral.sun import elevation as astral_elevation
+except ImportError:  # pragma: no cover - Home Assistant depends on astral
+    Observer = None
+    astral_azimuth = None
+    astral_elevation = None
 
 try:
     from homeassistant.components.weather import (
@@ -145,6 +156,7 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Expose learning details for diagnostics and migration."""
+        solar_orientation = self._controller.solar_orientation_diagnostics
         return {
             "learning_state": self._controller.learning_state,
             "learning_result": self._controller.learning_result,
@@ -155,6 +167,10 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
             ),
             "outside_temperature": self._controller.outside_temperature,
             "current_solar": self._controller.current_solar,
+            "current_solar_profile": self._controller.current_solar_profile,
+            "solar_orientation_azimuth": solar_orientation.get("azimuth"),
+            "solar_orientation_confidence": solar_orientation.get("confidence"),
+            "solar_exposure_bins": solar_orientation.get("exposure_bins"),
             "on_percent": self._controller.learning_on_percent,
             "underlying_entities": list(self._config.switch_entity_ids),
             "outdoor_entity_id": self._config.outdoor_entity_id,
@@ -272,8 +288,9 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
         self, event: Event[EventStateChangedData]
     ) -> None:
         """Update the solar intensity from a state event."""
+        solar = _coerce_state_temperature(event.data.get("new_state"))
         self._controller.update_current_solar(
-            _coerce_state_temperature(event.data.get("new_state"))
+            solar, self._build_current_solar_profile(solar)
         )
         self.async_write_ha_state()
 
@@ -301,12 +318,13 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
                     self.hass.states.get(self._config.outdoor_entity_id)
                 )
             )
+        solar = _coerce_state_temperature(
+            self.hass.states.get(self._detected_solar.current_entity_id)
+            if self._detected_solar.current_entity_id
+            else None
+        )
         self._controller.update_current_solar(
-            _coerce_state_temperature(
-                self.hass.states.get(self._detected_solar.current_entity_id)
-                if self._detected_solar.current_entity_id
-                else None
-            )
+            solar, self._build_current_solar_profile(solar)
         )
 
     async def _async_restore_runtime_state(self) -> None:
@@ -332,12 +350,20 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
         forecast_temperatures = await self._async_get_forecast_temperatures(
             self._config.lookahead_steps
         )
-        solar_forecast = self._async_get_solar_forecast(self._config.lookahead_steps)
+        solar_samples = self._async_get_solar_forecast_samples(
+            self._config.lookahead_steps
+        )
+        solar_forecast = [solar for _hour, solar in solar_samples]
+        solar_profile_forecast = self._async_get_solar_profile_forecast(
+            self._config.lookahead_steps, solar_samples
+        )
         ran = await self._controller.run_control_cycle(
             force=force,
             forecast_temperatures=forecast_temperatures,
             solar=self._controller.current_solar,
             solar_forecast=solar_forecast,
+            solar_profile=self._controller.current_solar_profile,
+            solar_profile_forecast=solar_profile_forecast,
             current_switch_active=self._is_any_switch_active(),
             turn_switches=self._async_turn_all_switches,
             persist=self._async_persist_learning_state_payload,
@@ -408,17 +434,62 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
 
     def _async_get_solar_forecast(self, steps: int) -> list[float]:
         """Build a solar forecast series from linked forecast sensors."""
+        return [solar for _hour, solar in self._async_get_solar_forecast_samples(steps)]
+
+    def _async_get_solar_forecast_samples(self, steps: int) -> list[tuple[int, float]]:
+        """Build solar forecast samples paired with their forecast horizons."""
         if steps <= 0 or not self._detected_solar.forecast_entity_ids:
             return []
-        forecast: list[float] = []
-        for entity_id in self._detected_solar.forecast_entity_ids:
+        forecast: list[tuple[int, float]] = []
+        for index, entity_id in enumerate(self._detected_solar.forecast_entity_ids):
             value = _coerce_state_temperature(self.hass.states.get(entity_id))
             if value is None:
                 continue
-            forecast.append(value)
+            hour = (
+                self._detected_solar.forecast_hours[index]
+                if index < len(self._detected_solar.forecast_hours)
+                else index + 1
+            )
+            forecast.append((hour, value))
             if len(forecast) == steps:
                 break
         return forecast
+
+    def _async_get_solar_profile_forecast(
+        self, steps: int, solar_forecast: list[tuple[int, float]]
+    ) -> list[list[float]]:
+        """Build solar exposure profiles for the linked solar forecast series."""
+        if steps <= 0 or not solar_forecast:
+            return []
+        profiles: list[list[float]] = []
+        now = dt_util.utcnow()
+        for hour, solar in solar_forecast[:steps]:
+            position = _solar_position_at(self.hass, now + timedelta(hours=hour))
+            profiles.append(
+                list(
+                    build_solar_profile(
+                        solar_flux=solar,
+                        sun_azimuth=position.azimuth if position is not None else None,
+                        sun_elevation=(
+                            position.elevation if position is not None else None
+                        ),
+                    ).features
+                )
+            )
+        return profiles
+
+    def _build_current_solar_profile(self, solar: float | None) -> list[float] | None:
+        """Build the current directional solar profile from the sun entity."""
+        if solar is None:
+            return None
+        position = _current_sun_position(self.hass)
+        return list(
+            build_solar_profile(
+                solar_flux=solar,
+                sun_azimuth=position.azimuth if position is not None else None,
+                sun_elevation=position.elevation if position is not None else None,
+            ).features
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -427,6 +498,15 @@ class DetectedSolarEntities:
 
     current_entity_id: str | None = None
     forecast_entity_ids: tuple[str, ...] = ()
+    forecast_hours: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SunPosition:
+    """Sun position in Home Assistant azimuth/elevation degrees."""
+
+    azimuth: float
+    elevation: float
 
 
 def _detect_pirate_weather_solar_entities(
@@ -472,6 +552,7 @@ def _detect_pirate_weather_solar_entities(
         forecast_entity_ids=tuple(
             entity_id for _hour, entity_id in forecast_candidates
         ),
+        forecast_hours=tuple(hour for hour, _entity_id in forecast_candidates),
     )
 
 
@@ -506,6 +587,37 @@ def _extract_hourly_forecast_horizon(
         if match is not None:
             return int(match.group(1))
     return None
+
+
+def _current_sun_position(hass: HomeAssistant) -> SunPosition | None:
+    """Return current sun position from Home Assistant state attributes."""
+    state = hass.states.get("sun.sun")
+    if state is None:
+        return None
+    azimuth = _coerce_float(state.attributes.get("azimuth"))
+    elevation = _coerce_float(state.attributes.get("elevation"))
+    if azimuth is None or elevation is None:
+        return None
+    return SunPosition(azimuth=azimuth, elevation=elevation)
+
+
+def _solar_position_at(hass: HomeAssistant, when: datetime) -> SunPosition | None:
+    """Calculate sun position for a future timestamp using Astral."""
+    if Observer is None or astral_azimuth is None or astral_elevation is None:
+        return None
+    try:
+        observer = Observer(
+            latitude=hass.config.latitude,
+            longitude=hass.config.longitude,
+            elevation=hass.config.elevation,
+        )
+        point_in_time = dt_util.as_utc(when)
+        return SunPosition(
+            azimuth=float(astral_azimuth(observer, point_in_time)),
+            elevation=float(astral_elevation(observer, point_in_time)),
+        )
+    except Exception:  # pragma: no cover - depends on runtime HA location data
+        return None
 
 
 async def _async_weather_forecast(

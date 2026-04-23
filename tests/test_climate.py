@@ -317,3 +317,93 @@ async def test_detect_pirate_weather_live_entity_names(hass) -> None:
     assert list(detected.forecast_entity_ids) == [
         "sensor.pirateweather_downward_short_wave_radiation_flux_1h",
     ]
+
+
+async def test_pirate_weather_solar_uses_sun_position_for_profiles(
+    hass, monkeypatch
+) -> None:
+    """Solar flux should be combined with current and forecast sun position."""
+    pirate_entry = MockConfigEntry(domain="pirateweather", title="Pirate Weather")
+    pirate_entry.add_to_hass(hass)
+
+    registry = er.async_get(hass)
+    registry.async_get_or_create(
+        "weather",
+        "pirateweather",
+        "weather-profile-unique",
+        config_entry=pirate_entry,
+        object_id_base="pirateweather",
+        original_name="PirateWeather",
+    )
+    registry.async_get_or_create(
+        "sensor",
+        "pirateweather",
+        "solar-current-profile",
+        config_entry=pirate_entry,
+        object_id_base="pirateweather_downward_short_wave_radiation_flux",
+        original_name="PirateWeather Downward Short-Wave Radiation Flux",
+    )
+    registry.async_get_or_create(
+        "sensor",
+        "pirateweather",
+        "solar-1h-profile",
+        config_entry=pirate_entry,
+        object_id_base="pirateweather_downward_short_wave_radiation_flux_1h",
+        original_name="PirateWeather Downward Short-Wave Radiation Flux 1h",
+    )
+
+    hass.states.async_set("sensor.kitchen_temperature", "18.0")
+    hass.states.async_set("weather.pirateweather", "sunny", {"temperature": 7.0})
+    hass.states.async_set("switch.floor_a", "off")
+    hass.states.async_set("switch.floor_b", "off")
+    hass.states.async_set(
+        "sun.sun",
+        "above_horizon",
+        {"azimuth": 180.0, "elevation": 45.0},
+    )
+    hass.states.async_set(
+        "sensor.pirateweather_downward_short_wave_radiation_flux",
+        "200.0",
+    )
+    hass.states.async_set(
+        "sensor.pirateweather_downward_short_wave_radiation_flux_1h",
+        "100.0",
+    )
+    async_mock_service(hass, "switch", "turn_on")
+    async_mock_service(hass, "switch", "turn_off")
+
+    monkeypatch.setattr(
+        climate_module,
+        "_solar_position_at",
+        lambda _hass, _when: climate_module.SunPosition(azimuth=180.0, elevation=45.0),
+    )
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Kitchen Floor",
+        data={
+            **_entry().data,
+            CONF_OUTDOOR_ENTITY_ID: "weather.pirateweather",
+        },
+    )
+    entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    await hass.services.async_call(
+        DOMAIN,
+        SERVICE_TRIGGER_TICK,
+        {"entity_id": "climate.kitchen_floor", "force": True},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+
+    state = hass.states.get("climate.kitchen_floor")
+    assert state is not None
+    current_profile = state.attributes["current_solar_profile"]
+    assert current_profile[0] == 200.0
+    assert current_profile[5] > current_profile[1]
+    assert state.attributes["solar_orientation_azimuth"] is None
+    forecast_profile = state.attributes["learning_result"]["forecast_solar_profile"][0]
+    assert forecast_profile[0] == 100.0
+    assert forecast_profile[5] > forecast_profile[1]
