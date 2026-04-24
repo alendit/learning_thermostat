@@ -45,6 +45,7 @@ from homeassistant.helpers.event import (
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.util import dt as dt_util
 
+from .attributes import compact_state_attributes
 from .const import (
     DATA_SERVICES_REGISTERED,
     DATA_STORAGE,
@@ -157,27 +158,31 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         """Expose learning details for diagnostics and migration."""
         solar_orientation = self._controller.solar_orientation_diagnostics
-        return {
-            "learning_state": self._controller.learning_state,
-            "learning_result": self._controller.learning_result,
-            "learning_last_tick": (
-                self._controller.learning_last_tick.isoformat()
-                if self._controller.learning_last_tick is not None
-                else None
-            ),
-            "outside_temperature": self._controller.outside_temperature,
-            "current_solar": self._controller.current_solar,
-            "current_solar_profile": self._controller.current_solar_profile,
-            "solar_orientation_azimuth": solar_orientation.get("azimuth"),
-            "solar_orientation_confidence": solar_orientation.get("confidence"),
-            "solar_exposure_bins": solar_orientation.get("exposure_bins"),
-            "on_percent": self._controller.learning_on_percent,
-            "underlying_entities": list(self._config.switch_entity_ids),
-            "outdoor_entity_id": self._config.outdoor_entity_id,
-            "legacy_forecast_entity_id": self._config.legacy_forecast_entity_id,
-            "solar_entity_id": self._detected_solar.current_entity_id,
-            "solar_forecast_entity_ids": list(self._detected_solar.forecast_entity_ids),
-        }
+        return compact_state_attributes(
+            {
+                "learning_state": self._controller.learning_state,
+                "learning_result": self._controller.learning_result,
+                "learning_last_tick": (
+                    self._controller.learning_last_tick.isoformat()
+                    if self._controller.learning_last_tick is not None
+                    else None
+                ),
+                "outside_temperature": self._controller.outside_temperature,
+                "current_solar": self._controller.current_solar,
+                "current_solar_profile": self._controller.current_solar_profile,
+                "solar_orientation_azimuth": solar_orientation.get("azimuth"),
+                "solar_orientation_confidence": solar_orientation.get("confidence"),
+                "solar_exposure_bins": solar_orientation.get("exposure_bins"),
+                "on_percent": self._controller.learning_on_percent,
+                "underlying_entities": list(self._config.switch_entity_ids),
+                "outdoor_entity_id": self._config.outdoor_entity_id,
+                "legacy_forecast_entity_id": self._config.legacy_forecast_entity_id,
+                "solar_entity_id": self._detected_solar.current_entity_id,
+                "solar_forecast_entity_ids": list(
+                    self._detected_solar.forecast_entity_ids
+                ),
+            }
+        )
 
     async def async_added_to_hass(self) -> None:
         """Register listeners and restore state."""
