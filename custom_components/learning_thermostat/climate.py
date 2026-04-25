@@ -43,6 +43,7 @@ from homeassistant.helpers.event import (
     async_track_time_interval,
 )
 from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.util import dt as dt_util
 
 from .attributes import compact_state_attributes
@@ -54,8 +55,8 @@ from .const import (
     SERVICE_RESET_LEARNING,
     SERVICE_TRIGGER_TICK,
 )
-from .controller import ThermostatConfig, ThermostatController
-from .solar import build_solar_profile
+from .runtime import LearningThermostatRuntime, async_get_or_create_runtime
+from .solar import build_solar_sample
 from .storage import LearningEntryPayload, LearningStateStore
 
 try:
@@ -107,11 +108,11 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
         self._entry = entry
         self._store = store
         self._name = entry.title or entry.data.get("name", NAME)
-        self._config = ThermostatConfig.from_mapping(
-            name=self._name,
-            data=dict(entry.data),
+        self._runtime: LearningThermostatRuntime = async_get_or_create_runtime(
+            hass, entry
         )
-        self._controller = ThermostatController(self._config)
+        self._config = self._runtime.config
+        self._controller = self._runtime.controller
         self._attr_name = self._name
         self._attr_unique_id = entry.entry_id
         self._attr_should_poll = False
@@ -169,10 +170,10 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
                 ),
                 "outside_temperature": self._controller.outside_temperature,
                 "current_solar": self._controller.current_solar,
-                "current_solar_profile": self._controller.current_solar_profile,
+                "current_solar_sample": self._controller.current_solar_sample,
                 "solar_orientation_azimuth": solar_orientation.get("azimuth"),
                 "solar_orientation_confidence": solar_orientation.get("confidence"),
-                "solar_exposure_bins": solar_orientation.get("exposure_bins"),
+                "solar_orientation": solar_orientation,
                 "on_percent": self._controller.learning_on_percent,
                 "underlying_entities": list(self._config.switch_entity_ids),
                 "outdoor_entity_id": self._config.outdoor_entity_id,
@@ -295,7 +296,7 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
         """Update the solar intensity from a state event."""
         solar = _coerce_state_temperature(event.data.get("new_state"))
         self._controller.update_current_solar(
-            solar, self._build_current_solar_profile(solar)
+            solar, self._build_current_solar_sample(solar)
         )
         self.async_write_ha_state()
 
@@ -329,7 +330,7 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
             else None
         )
         self._controller.update_current_solar(
-            solar, self._build_current_solar_profile(solar)
+            solar, self._build_current_solar_sample(solar)
         )
 
     async def _async_restore_runtime_state(self) -> None:
@@ -359,7 +360,7 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
             self._config.lookahead_steps
         )
         solar_forecast = [solar for _hour, solar in solar_samples]
-        solar_profile_forecast = self._async_get_solar_profile_forecast(
+        solar_sample_forecast = self._async_get_solar_sample_forecast(
             self._config.lookahead_steps, solar_samples
         )
         ran = await self._controller.run_control_cycle(
@@ -367,13 +368,14 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
             forecast_temperatures=forecast_temperatures,
             solar=self._controller.current_solar,
             solar_forecast=solar_forecast,
-            solar_profile=self._controller.current_solar_profile,
-            solar_profile_forecast=solar_profile_forecast,
+            solar_sample=self._controller.current_solar_sample,
+            solar_sample_forecast=solar_sample_forecast,
             current_switch_active=self._is_any_switch_active(),
             turn_switches=self._async_turn_all_switches,
             persist=self._async_persist_learning_state_payload,
         )
         self.async_write_ha_state()
+        async_dispatcher_send(self.hass, self._runtime.update_signal)
         return ran
 
     async def _async_persist_learning_state(self) -> None:
@@ -460,41 +462,37 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
                 break
         return forecast
 
-    def _async_get_solar_profile_forecast(
+    def _async_get_solar_sample_forecast(
         self, steps: int, solar_forecast: list[tuple[int, float]]
-    ) -> list[list[float]]:
-        """Build solar exposure profiles for the linked solar forecast series."""
+    ) -> list[dict[str, float | None]]:
+        """Build raw solar samples for the linked solar forecast series."""
         if steps <= 0 or not solar_forecast:
             return []
-        profiles: list[list[float]] = []
+        samples: list[dict[str, float | None]] = []
         now = dt_util.utcnow()
         for hour, solar in solar_forecast[:steps]:
             position = _solar_position_at(self.hass, now + timedelta(hours=hour))
-            profiles.append(
-                list(
-                    build_solar_profile(
-                        solar_flux=solar,
-                        sun_azimuth=position.azimuth if position is not None else None,
-                        sun_elevation=(
-                            position.elevation if position is not None else None
-                        ),
-                    ).features
-                )
+            samples.append(
+                build_solar_sample(
+                    solar_flux=solar,
+                    sun_azimuth=position.azimuth if position is not None else None,
+                    sun_elevation=position.elevation if position is not None else None,
+                ).as_dict()
             )
-        return profiles
+        return samples
 
-    def _build_current_solar_profile(self, solar: float | None) -> list[float] | None:
-        """Build the current directional solar profile from the sun entity."""
+    def _build_current_solar_sample(
+        self, solar: float | None
+    ) -> dict[str, float | None] | None:
+        """Build the current raw solar sample from the sun entity."""
         if solar is None:
             return None
         position = _current_sun_position(self.hass)
-        return list(
-            build_solar_profile(
-                solar_flux=solar,
-                sun_azimuth=position.azimuth if position is not None else None,
-                sun_elevation=position.elevation if position is not None else None,
-            ).features
-        )
+        return build_solar_sample(
+            solar_flux=solar,
+            sun_azimuth=position.azimuth if position is not None else None,
+            sun_elevation=position.elevation if position is not None else None,
+        ).as_dict()
 
 
 @dataclass(frozen=True, slots=True)

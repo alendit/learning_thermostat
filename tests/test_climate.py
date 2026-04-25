@@ -319,7 +319,7 @@ async def test_detect_pirate_weather_live_entity_names(hass) -> None:
     ]
 
 
-async def test_pirate_weather_solar_uses_sun_position_for_profiles(
+async def test_pirate_weather_solar_uses_sun_position_for_samples(
     hass, monkeypatch
 ) -> None:
     """Solar flux should be combined with current and forecast sun position."""
@@ -400,10 +400,42 @@ async def test_pirate_weather_solar_uses_sun_position_for_profiles(
 
     state = hass.states.get("climate.kitchen_floor")
     assert state is not None
-    current_profile = state.attributes["current_solar_profile"]
-    assert current_profile[0] == 200.0
-    assert current_profile[5] > current_profile[1]
+    current_sample = state.attributes["current_solar_sample"]
+    assert current_sample == {"flux": 200.0, "azimuth": 180.0, "elevation": 45.0}
     assert state.attributes["solar_orientation_azimuth"] is None
-    forecast_profile = state.attributes["learning_result"]["forecast_solar_profile"][0]
-    assert forecast_profile[0] == 100.0
-    assert forecast_profile[5] > forecast_profile[1]
+    forecast_sample = state.attributes["learning_result"]["forecast_solar_samples"][0]
+    assert forecast_sample == {"flux": 100.0, "azimuth": 180.0, "elevation": 45.0}
+
+
+async def test_solar_orientation_diagnostic_sensor_updates_after_tick(hass) -> None:
+    """Each thermostat should expose a human-readable solar orientation sensor."""
+    hass.states.async_set("sensor.kitchen_temperature", "18.0")
+    hass.states.async_set("sensor.outside_temperature", "7.0")
+    hass.states.async_set("switch.floor_a", "off")
+    hass.states.async_set("switch.floor_b", "off")
+    async_mock_service(hass, "switch", "turn_on")
+    async_mock_service(hass, "switch", "turn_off")
+
+    entry = _entry()
+    entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    sensor_state = hass.states.get("sensor.kitchen_floor_solar_orientation")
+    assert sensor_state is not None
+    assert sensor_state.state == "unknown"
+
+    await hass.services.async_call(
+        DOMAIN,
+        SERVICE_TRIGGER_TICK,
+        {"entity_id": "climate.kitchen_floor", "force": True},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+
+    sensor_state = hass.states.get("sensor.kitchen_floor_solar_orientation")
+    assert sensor_state is not None
+    assert sensor_state.attributes["model"] in (
+        "delta_zscore",
+        "delta_zscore_solar_orientation",
+    )

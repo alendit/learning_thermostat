@@ -11,18 +11,21 @@ from custom_components.learning_thermostat.attributes import (
 
 
 def _oversized_attributes() -> dict:
-    """Build an attribute payload shaped like a learned solar-profile thermostat."""
-    weights = [(-0.175 + idx * 0.00234123456789) for idx in range(139)]
-    solar_profile = [
-        [316.67123456789, 0.0, 134.17893181267667, 262.98711266187144]
-        + [237.74100964308306, 73.22944750764938, 0.0, 0.0, 0.0]
-        for _ in range(12)
+    """Build an attribute payload shaped like a learned solar-orientation thermostat."""
+    weights = [(-0.175 + idx * 0.00234123456789) for idx in range(67)]
+    solar_samples = [
+        {
+            "flux": 316.67123456789 - idx * 19.123456789,
+            "azimuth": 270.123456789,
+            "elevation": 34.987654321,
+        }
+        for idx in range(12)
     ]
     history = {
         "t_room": [22.23456789 + idx * 0.01 for idx in range(12)],
         "t_out": [8.923456789 - idx * 0.57 for idx in range(12)],
         "solar": [316.67123456789 - idx * 19.123456789 for idx in range(12)],
-        "solar_profile": solar_profile,
+        "solar_samples": solar_samples,
         "u": [1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0],
         "pred_next": [22.501245129640964 + idx * 0.01 for idx in range(12)],
         "pred_abs_error": [0.1012451296409651 + idx * 0.01 for idx in range(12)],
@@ -55,10 +58,13 @@ def _oversized_attributes() -> dict:
     return {
         "learning_state": {
             "weights": weights,
-            "model": "delta_zscore_solar_profile",
+            "model": "delta_zscore_solar_orientation",
             "history": history,
             "last_u": 1,
             "last_plan": {"start_step": 0, "stop_step": 4},
+            "solar_orientation_azimuth": 180.0,
+            "solar_orientation_confidence": 0.7348204209906434,
+            "solar_orientation_score": 0.00234123456789,
             "eta": 0.005194993916929889,
             "base_eta": 0.01,
             "prev_feature": [idx * 0.123456789 for idx in range(139)],
@@ -74,16 +80,20 @@ def _oversized_attributes() -> dict:
                 "use_solar_feature": True,
             },
             "solar_orientation": {
-                "azimuth": 45.0,
-                "confidence": 0.23482042099064335,
-                "exposure_bins": {
-                    str(idx * 45.0): idx * 0.00432123456789 for idx in range(8)
-                },
+                "azimuth": 270.0,
+                "confidence": 0.7348204209906434,
+                "orientation_1": "west",
+                "orientation_1_azimuth": 270.0,
+                "orientation_1_contribution_pct": 90.123456789,
+                "orientation_2": "south",
+                "orientation_2_azimuth": 180.0,
+                "orientation_2_contribution_pct": 9.876543211,
+                "state": "west 90%, south 10%",
             },
         },
         "learning_result": {
             "weights": weights,
-            "forecast_solar_profile": solar_profile[:8],
+            "forecast_solar_samples": solar_samples[:8],
             "predicted_temps": [22.14617716929864 + idx * 0.03 for idx in range(12)],
             "planned_states": [1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0],
             "update": update,
@@ -100,7 +110,7 @@ def _oversized_attributes() -> dict:
         ],
         "outside_temperature": 9.8,
         "current_solar": 378.24,
-        "current_solar_profile": solar_profile[0],
+        "current_solar_sample": solar_samples[0],
     }
 
 
@@ -119,7 +129,8 @@ def test_compact_state_attributes_fit_recorder_limit_without_dropping_model() ->
     assert _json_size(compacted) < RECORDER_ATTRIBUTE_SAFE_BYTES
     assert RECORDER_ATTRIBUTE_SAFE_BYTES == 16000
     assert compacted["learning_state"]["weights"]
-    assert compacted["learning_state"]["history"]["solar_profile"]
+    assert compacted["learning_state"]["history"]["solar_samples"]
     assert compacted["learning_state"]["prev_feature"]
+    assert "solar_training_examples" not in compacted["learning_state"]
     assert "weights" not in compacted["learning_result"]
     assert "delta" not in compacted["learning_result"]["update"]

@@ -7,7 +7,7 @@ from homeassistant.const import Platform
 DOMAIN = "learning_thermostat"
 NAME = "Learning Thermostat"
 
-PLATFORMS = [Platform.CLIMATE]
+PLATFORMS = [Platform.CLIMATE, Platform.SENSOR]
 
 CONF_UNDERLYING_ENTITY_IDS = "underlying_entity_ids"
 CONF_TEMPERATURE_SENSOR_ENTITY_ID = "temperature_sensor_entity_id"
@@ -36,3 +36,4 @@ DEFAULT_MAX_TEMPERATURE = 28.0
 
 DATA_STORAGE = "storage"
 DATA_SERVICES_REGISTERED = "services_registered"
+DATA_RUNTIMES = "runtimes"
