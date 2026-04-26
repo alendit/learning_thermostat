@@ -24,6 +24,12 @@ import time
 from typing import Any
 import numpy as np
 
+from .const import (
+    DEFAULT_LEARNING_MODEL,
+    LEARNING_MODEL_LABELS,
+    LEARNING_MODEL_LINEAR,
+    LEARNING_MODEL_PHYSICAL,
+)
 from .solar import (
     SOLAR_ORIENTATION_FEATURE_SIZE,
     SOLAR_PROFILE_BIN_AZIMUTHS,
@@ -50,6 +56,9 @@ SOLAR_ORIENTATION_MIN_ACTIVE_EXAMPLES = 4
 SOLAR_ORIENTATION_TRAINING_MAX = 96
 SOLAR_ACTIVE_FLUX_MIN = 10.0
 SOLAR_ORIENTATION_IMPROVEMENT_MIN = 0.02
+MODEL_SCHEMA_VERSION = 2
+PHYSICAL_HALF_LIFE_MINUTES = (60.0, 180.0, 360.0)
+PHYSICAL_SOLAR_SCALE = 500.0
 
 DEFAULT_LEARNING_SWITCH_CONFIG = {
     "lookahead_steps": 24,
@@ -60,6 +69,7 @@ DEFAULT_LEARNING_SWITCH_CONFIG = {
     "history_decay": 1.0,
     "error_decay": 0.9,
     "default_u_gain_per_hour": 0.1,
+    "learning_model": DEFAULT_LEARNING_MODEL,
 }
 
 
@@ -104,6 +114,11 @@ class LearningSwitchOptimizer:
             self._config.get("default_u_gain_per_hour"),
             DEFAULT_LEARNING_SWITCH_CONFIG["default_u_gain_per_hour"],
         )
+        self._learning_model = self._normalize_learning_model(
+            self._config.get("learning_model")
+        )
+        self._model_schema_version = MODEL_SCHEMA_VERSION
+        self._feature_step_minutes = 60.0
 
         # Optional starting weights.
         self._weights_init = self._config.get("weights_init")
@@ -173,11 +188,59 @@ class LearningSwitchOptimizer:
         self._warned_invalid_weights = False
 
     def _model_name(self) -> str:
-        """Return the current persisted model identifier."""
+        """Return the user-facing learning model label."""
+        return LEARNING_MODEL_LABELS[self._learning_model]
+
+    def _model_id(self) -> str:
+        """Return the compact internal model identifier."""
+        if self._learning_model == LEARNING_MODEL_PHYSICAL:
+            return (
+                "physical_solar_orientation" if self._use_solar_feature else "physical"
+            )
+        return "linear_solar_orientation" if self._use_solar_feature else "linear"
+
+    def _normalize_learning_model(self, value: Any) -> str:
+        """Normalize the configured learning model identifier."""
+        model = str(value or DEFAULT_LEARNING_MODEL)
+        if model not in LEARNING_MODEL_LABELS:
+            return LEARNING_MODEL_LINEAR
+        return model
+
+    def _snapshot_model_id(self, state: dict) -> str | None:
+        """Return the internal model id represented by a snapshot."""
+        model_id = state.get("model_id")
+        if isinstance(model_id, str) and model_id:
+            return model_id
+        model = state.get("model")
+        if model == "Physical":
+            return (
+                "physical_solar_orientation" if self._use_solar_feature else "physical"
+            )
+        if model == "Linear":
+            return "linear_solar_orientation" if self._use_solar_feature else "linear"
+        if model == "delta_zscore":
+            return "linear"
+        if model in {
+            "delta_zscore_solar",
+            "delta_zscore_solar_profile",
+            "delta_zscore_solar_orientation",
+        }:
+            return "linear_solar_orientation"
+        return None
+
+    def _legacy_model_type(self, state: dict) -> str | None:
+        """Return a legacy linear model id when one is present."""
+        model = state.get("model")
         return (
-            "delta_zscore_solar_orientation"
-            if self._use_solar_feature
-            else "delta_zscore"
+            model
+            if model
+            in {
+                "delta_zscore",
+                "delta_zscore_solar",
+                "delta_zscore_solar_profile",
+                "delta_zscore_solar_orientation",
+            }
+            else None
         )
 
     def snapshot_state(self) -> dict:
@@ -185,6 +248,8 @@ class LearningSwitchOptimizer:
         return {
             "weights": self._weights.tolist(),
             "model": self._model_name(),
+            "model_id": self._model_id(),
+            "model_schema_version": self._model_schema_version,
             "history": {
                 "t_room": list(self._t_hist),
                 "t_out": list(self._out_hist),
@@ -229,6 +294,7 @@ class LearningSwitchOptimizer:
                 "error_decay": self._error_decay,
                 "default_u_gain_per_hour": self._default_u_gain_per_hour,
                 "use_solar_feature": self._use_solar_feature,
+                "learning_model": self._learning_model,
             },
             "solar_orientation": self.solar_orientation_diagnostics(),
         }
@@ -239,27 +305,29 @@ class LearningSwitchOptimizer:
             if not isinstance(state, dict):
                 return
 
-            model_type = state.get("model")
-            model_matches = model_type in {
-                "delta_zscore",
-                "delta_zscore_solar",
-                "delta_zscore_solar_profile",
-                "delta_zscore_solar_orientation",
-            }
+            model_type = self._legacy_model_type(state)
+            snapshot_model_id = self._snapshot_model_id(state)
+            model_matches = snapshot_model_id == self._model_id()
             weights = state.get("weights")
             if model_matches and weights is not None:
                 restored = np.array([float(v) for v in weights], dtype=float)
-                if (
-                    restored.size == self._weights.size
-                    and model_type == self._model_name()
-                ):
+                if restored.size == self._weights.size:
                     if np.allclose(restored, 0.0) or not np.all(np.isfinite(restored)):
                         restored = self._init_weights(self._weights_init)
                     self._weights = restored
-                else:
+                elif self._learning_model == LEARNING_MODEL_LINEAR:
                     adapted = self._adapt_weights(restored, model_type)
                     if adapted is not None:
                         self._weights = adapted
+            elif (
+                weights is not None
+                and self._learning_model == LEARNING_MODEL_LINEAR
+                and model_type is not None
+            ):
+                restored = np.array([float(v) for v in weights], dtype=float)
+                adapted = self._adapt_weights(restored, model_type)
+                if adapted is not None:
+                    self._weights = adapted
             elif weights is not None:
                 self._weights = self._init_weights(self._weights_init)
 
@@ -344,6 +412,7 @@ class LearningSwitchOptimizer:
                 )
             else:
                 self._prev_feature = None
+                self._clear_pending_predictions()
         except Exception as exc:  # noqa: BLE001 - keep restore resilient
             _LOGGER.warning("%s - Learning state restore failed: %s", self._name, exc)
 
@@ -451,6 +520,9 @@ class LearningSwitchOptimizer:
 
     def _feature_size(self) -> int:
         """Return the feature vector size without the bias term."""
+        if self._learning_model == LEARNING_MODEL_PHYSICAL:
+            solar_size = 9 if self._use_solar_feature else 0
+            return 6 + solar_size + 3
         return self._history_steps * (3 + self._solar_profile_size())
 
     def _init_weights(self, weights_init) -> np.ndarray:
@@ -498,14 +570,22 @@ class LearningSwitchOptimizer:
             return False
         u_index = self._u_weight_start()
         if u_index < self._weights.size:
-            self._weights[u_index] = float(delta)
+            if self._learning_model == LEARNING_MODEL_PHYSICAL:
+                feature_delta = self._physical_filter_delta(
+                    PHYSICAL_HALF_LIFE_MINUTES[0], minutes
+                )
+                if feature_delta <= 0.0:
+                    return False
+                self._weights[u_index] = float(delta / feature_delta)
+            else:
+                self._weights[u_index] = float(delta)
             return True
         return False
 
     def _cap_u_weights(self) -> bool:
         """Clamp on/off weights to a small positive minimum."""
         start = self._u_weight_start()
-        end = start + self._history_steps
+        end = start + self._heat_feature_count()
         if start >= self._weights.size:
             return False
         floor = U_WEIGHT_MIN
@@ -517,8 +597,18 @@ class LearningSwitchOptimizer:
 
     def _u_weight_start(self) -> int:
         """Return the start index of the heating-control weights."""
+        if self._learning_model == LEARNING_MODEL_PHYSICAL:
+            return 6 + (9 if self._use_solar_feature else 0)
         return (
             self._history_steps * 2 + self._history_steps * self._solar_profile_size()
+        )
+
+    def _heat_feature_count(self) -> int:
+        """Return the number of heating-control features."""
+        return (
+            3
+            if self._learning_model == LEARNING_MODEL_PHYSICAL
+            else self._history_steps
         )
 
     def _coerce_int(self, value, default: int) -> int:
@@ -666,6 +756,14 @@ class LearningSwitchOptimizer:
                 count_val = len(items)
             restored[horizon] = {"mean": mean_val, "count": count_val}
         return restored
+
+    def _clear_pending_predictions(self) -> None:
+        """Drop pending learning rows whose feature semantics may be stale."""
+        self._pending_k_step_preds.clear()
+        self._pending_k_step_features.clear()
+        self._pending_k_step_baseline.clear()
+        self._prev_feature = None
+        self._prev_orientation_input = None
 
     def _record_k_step_errors(
         self, actual_temp: float, step_index: int
@@ -1002,6 +1100,111 @@ class LearningSwitchOptimizer:
             u_hist,
         )
 
+    def _build_model_feature(
+        self,
+        t_hist: np.ndarray,
+        out_hist: np.ndarray,
+        solar_hist: np.ndarray | None,
+        u_hist: np.ndarray,
+    ) -> np.ndarray:
+        """Build a feature vector for the active learning model."""
+        if self._learning_model == LEARNING_MODEL_PHYSICAL:
+            return self._build_physical_feature(t_hist, out_hist, solar_hist, u_hist)
+        t_feat, out_feat, solar_feat, u_feat = self._transform_histories(
+            t_hist, out_hist, solar_hist, u_hist
+        )
+        return self._build_linear_feature(t_feat, out_feat, solar_feat, u_feat)
+
+    def _build_physical_feature(
+        self,
+        t_hist: np.ndarray,
+        out_hist: np.ndarray,
+        solar_hist: np.ndarray | None,
+        u_hist: np.ndarray,
+    ) -> np.ndarray:
+        """Build fixed-scale physical thermal features plus bias."""
+        room_now = float(t_hist[0]) if t_hist.size else 20.0
+        outside_now = float(out_hist[0]) if out_hist.size else 10.0
+        room_1h = self._history_value_at(t_hist, 60.0, room_now)
+        room_3h = self._history_value_at(t_hist, 180.0, room_now)
+        outside_3h = self._history_value_at(out_hist, 180.0, outside_now)
+        parts = [
+            np.array(
+                [
+                    (room_now - 20.0) / 10.0,
+                    (outside_now - 10.0) / 20.0,
+                    (room_now - outside_now) / 20.0,
+                    (room_now - room_1h) / 2.0,
+                    (room_now - room_3h) / 4.0,
+                    (outside_now - outside_3h) / 10.0,
+                ],
+                dtype=float,
+            )
+        ]
+        if solar_hist is not None:
+            parts.append(self._physical_solar_features(solar_hist))
+        parts.append(self._physical_filter_features(u_hist, scale=1.0))
+        parts.append(np.array([1.0], dtype=float))
+        return self._sanitize_array(np.concatenate(parts))
+
+    def _history_value_at(
+        self, values: np.ndarray, minutes_ago: float, default: float
+    ) -> float:
+        """Return a latest-first history value at a time offset with interpolation."""
+        if values.size == 0:
+            return float(default)
+        step_minutes = max(float(self._feature_step_minutes or 60.0), 1.0)
+        position = max(float(minutes_ago), 0.0) / step_minutes
+        if position <= 0.0:
+            return float(values[0])
+        if position >= values.size - 1:
+            return float(values[-1])
+        lower = int(math.floor(position))
+        upper = int(math.ceil(position))
+        if lower == upper:
+            return float(values[lower])
+        fraction = position - lower
+        return float(values[lower] * (1.0 - fraction) + values[upper] * fraction)
+
+    def _physical_filter_delta(
+        self, half_life_minutes: float, step_minutes: float
+    ) -> float:
+        """Return the newest-sample response of one exponential filter."""
+        minutes = max(float(step_minutes or 60.0), 1.0)
+        a = 0.5 ** (minutes / float(half_life_minutes))
+        return 1.0 - a
+
+    def _physical_filter_features(
+        self, values: np.ndarray, *, scale: float
+    ) -> np.ndarray:
+        """Return fast/medium/slow exposure filters for latest-first values."""
+        if values.size == 0:
+            values = np.zeros(1, dtype=float)
+        ordered = list(reversed([float(v) for v in values]))
+        step_minutes = max(float(self._feature_step_minutes or 60.0), 1.0)
+        filtered: list[float] = []
+        for half_life in PHYSICAL_HALF_LIFE_MINUTES:
+            state = 0.0
+            a = 0.5 ** (step_minutes / half_life)
+            for value in ordered:
+                state = a * state + (1.0 - a) * value
+            filtered.append(state / scale)
+        return np.array(filtered, dtype=float)
+
+    def _physical_solar_features(self, solar_hist: np.ndarray) -> np.ndarray:
+        """Return filtered diffuse and facade solar exposure features."""
+        rows = np.array(solar_hist, dtype=float)
+        if rows.ndim != 2 or rows.shape[1] < SOLAR_ORIENTATION_FEATURE_SIZE:
+            rows = np.zeros((1, SOLAR_ORIENTATION_FEATURE_SIZE), dtype=float)
+        diffuse = self._physical_filter_features(rows[:, 0], scale=PHYSICAL_SOLAR_SCALE)
+        facade_1 = self._physical_filter_features(
+            rows[:, 1], scale=PHYSICAL_SOLAR_SCALE
+        )
+        facade_2 = self._physical_filter_features(
+            rows[:, 2], scale=PHYSICAL_SOLAR_SCALE
+        )
+        return np.concatenate((diffuse, facade_1, facade_2))
+
     def _sanitize_array(self, values: np.ndarray) -> np.ndarray:
         """Replace non-finite values with a reasonable fill."""
         if np.all(np.isfinite(values)):
@@ -1018,6 +1221,16 @@ class LearningSwitchOptimizer:
         u_hist: np.ndarray,
     ) -> np.ndarray:
         """Assemble the linear feature vector from transformed histories plus bias."""
+        return self._build_linear_feature(t_hist, out_hist, solar_hist, u_hist)
+
+    def _build_linear_feature(
+        self,
+        t_hist: np.ndarray,
+        out_hist: np.ndarray,
+        solar_hist: np.ndarray | None,
+        u_hist: np.ndarray,
+    ) -> np.ndarray:
+        """Assemble the z-scored linear feature vector plus bias."""
         decay = self._history_decay_vector
         t_hist = t_hist * decay
         out_hist = out_hist * decay
@@ -1060,10 +1273,7 @@ class LearningSwitchOptimizer:
                     solar_hist[:-1],
                 )
             )
-        t_feat, out_feat, solar_feat, u_feat = self._transform_histories(
-            t_hist, out_hist, solar_hist_step, u_hist_step
-        )
-        x = self._build_feature(t_feat, out_feat, solar_feat, u_feat)
+        x = self._build_model_feature(t_hist, out_hist, solar_hist_step, u_hist_step)
         delta = float(x @ self._weights)
         t_next = float(t_hist[0] + delta)
         return t_next, x
@@ -1091,15 +1301,34 @@ class LearningSwitchOptimizer:
                     solar_hist[:-1],
                 )
             )
-        t_feat, out_feat, solar_feat, u_feat = self._transform_histories(
-            t_hist, out_hist, solar_hist_step, u_hist_step
-        )
-        x = self._build_feature(t_feat, out_feat, solar_feat, u_feat)
+        x = self._build_model_feature(t_hist, out_hist, solar_hist_step, u_hist_step)
         if x.size != self._weights.size:
             return np.zeros_like(self._weights)
         if not np.all(np.isfinite(x)) or not np.all(np.isfinite(self._weights)):
             return np.zeros_like(self._weights)
         return np.abs(x * self._weights)
+
+    def _solar_weight_start(self) -> int:
+        """Return the start index of solar weights for the active model."""
+        if not self._use_solar_feature:
+            return self._weights.size
+        if self._learning_model == LEARNING_MODEL_PHYSICAL:
+            return 6
+        return self._history_steps * 2
+
+    def _directional_solar_weight_indices(self, facade_index: int) -> list[int]:
+        """Return positive-directional solar weight indices for one facade."""
+        if not self._use_solar_feature:
+            return []
+        solar_start = self._solar_weight_start()
+        if self._learning_model == LEARNING_MODEL_PHYSICAL:
+            start = solar_start + 3 + int(facade_index) * 3
+            return [start, start + 1, start + 2]
+        offset = 1 + int(facade_index)
+        return [
+            solar_start + step * SOLAR_ORIENTATION_FEATURE_SIZE + offset
+            for step in range(self._history_steps)
+        ]
 
     def solar_orientation_diagnostics(self) -> dict:
         """Return the dominant learned solar exposure direction."""
@@ -1116,17 +1345,14 @@ class LearningSwitchOptimizer:
                 "state": "unknown",
             }
 
-        solar_start = self._history_steps * 2
         facade_weights = [0.0, 0.0]
-        for step in range(self._history_steps):
-            row_start = solar_start + step * SOLAR_ORIENTATION_FEATURE_SIZE
-            for bin_index in (1, 2):
-                weight_index = row_start + bin_index
+        for facade_index in (0, 1):
+            for weight_index in self._directional_solar_weight_indices(facade_index):
                 if weight_index >= self._weights.size:
                     continue
                 weight = float(self._weights[weight_index])
                 if np.isfinite(weight) and weight > 0.0:
-                    facade_weights[bin_index - 1] += weight
+                    facade_weights[facade_index] += weight
 
         total = sum(facade_weights)
         if total <= 0.0 or self._solar_orientation_azimuth is None:
@@ -1524,10 +1750,7 @@ class LearningSwitchOptimizer:
         self._ensure_weights_finite()
         self._cap_u_weights()
         if changed:
-            self._pending_k_step_preds.clear()
-            self._pending_k_step_features.clear()
-            self._pending_k_step_baseline.clear()
-            self._prev_feature = None
+            self._clear_pending_predictions()
 
     def _fit_orientation_score(
         self, examples: list[dict[str, Any]], orientation: float | None
@@ -1594,13 +1817,12 @@ class LearningSwitchOptimizer:
         if len(solar_rows) != self._history_steps:
             return None
         solar_hist = np.array(solar_rows, dtype=float)
-        t_feat, out_feat, solar_feat, u_feat = self._transform_histories(
+        return self._build_model_feature(
             self._sanitize_array(t_hist),
             self._sanitize_array(out_hist),
             self._sanitize_array(solar_hist),
             self._sanitize_array(u_hist),
         )
-        return self._build_feature(t_feat, out_feat, solar_feat, u_feat)
 
     def _example_solar_active(self, example: dict[str, Any]) -> bool:
         """Return whether an orientation example contains usable directional sun."""
@@ -1623,11 +1845,8 @@ class LearningSwitchOptimizer:
         clamped = np.array(weights, dtype=float)
         if not self._use_solar_feature:
             return clamped
-        solar_start = self._history_steps * 2
-        for step in range(self._history_steps):
-            row_start = solar_start + step * SOLAR_ORIENTATION_FEATURE_SIZE
-            for offset in (1, 2):
-                index = row_start + offset
+        for facade_index in (0, 1):
+            for index in self._directional_solar_weight_indices(facade_index):
                 if index < clamped.size and clamped[index] < 0.0:
                     clamped[index] = 0.0
         return clamped
@@ -1667,6 +1886,12 @@ class LearningSwitchOptimizer:
         ]
         if sum(gains) <= 0.0:
             return adjusted
+        if self._learning_model == LEARNING_MODEL_PHYSICAL:
+            for facade_index, gain in enumerate(gains):
+                for index in self._directional_solar_weight_indices(facade_index):
+                    if index < adjusted.size:
+                        adjusted[index] = gain * PHYSICAL_SOLAR_SCALE
+            return adjusted
         solar_start = self._history_steps * 2
         for step in range(self._history_steps):
             row_start = solar_start + step * SOLAR_ORIENTATION_FEATURE_SIZE
@@ -1684,15 +1909,12 @@ class LearningSwitchOptimizer:
         if not self._use_solar_feature:
             return 0.0
         facade_weights = [0.0, 0.0]
-        solar_start = self._history_steps * 2
-        for step in range(self._history_steps):
-            row_start = solar_start + step * SOLAR_ORIENTATION_FEATURE_SIZE
-            for offset in (1, 2):
-                index = row_start + offset
+        for facade_index in (0, 1):
+            for index in self._directional_solar_weight_indices(facade_index):
                 if index < weights.size:
                     value = float(weights[index])
                     if np.isfinite(value) and value > 0.0:
-                        facade_weights[offset - 1] += value
+                        facade_weights[facade_index] += value
         assigned_targets = [0.0, 0.0]
         for example in examples:
             samples = example.get("solar_samples")
@@ -1905,6 +2127,15 @@ class LearningSwitchOptimizer:
             u_actual = int(self._last_u)
         else:
             u_actual = 0
+        try:
+            self._feature_step_minutes = float(step_minutes or 60.0)
+        except (TypeError, ValueError):
+            self._feature_step_minutes = 60.0
+        if (
+            not np.isfinite(self._feature_step_minutes)
+            or self._feature_step_minutes <= 0
+        ):
+            self._feature_step_minutes = 60.0
 
         weights_reset = self._ensure_weights_finite()
         if self._apply_default_u_gain(step_minutes):
@@ -2170,7 +2401,11 @@ class LearningSwitchOptimizer:
         theta_outside = None
         theta_inside = None
         u_group_index = self._u_weight_start()
-        if self._weights.size >= u_group_index + self._history_steps:
+        if self._learning_model == LEARNING_MODEL_PHYSICAL:
+            if self._weights.size >= u_group_index + 3:
+                theta_outside = float(self._weights[1])
+                theta_inside = float(self._weights[u_group_index])
+        elif self._weights.size >= u_group_index + self._history_steps:
             theta_outside = float(self._weights[self._history_steps])
             theta_inside = float(self._weights[u_group_index])
 

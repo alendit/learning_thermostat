@@ -435,7 +435,4 @@ async def test_solar_orientation_diagnostic_sensor_updates_after_tick(hass) -> N
 
     sensor_state = hass.states.get("sensor.kitchen_floor_solar_orientation")
     assert sensor_state is not None
-    assert sensor_state.attributes["model"] in (
-        "delta_zscore",
-        "delta_zscore_solar_orientation",
-    )
+    assert sensor_state.attributes["model"] == "Linear"

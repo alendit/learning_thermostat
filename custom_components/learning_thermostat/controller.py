@@ -10,6 +10,12 @@ from typing import Any, Protocol
 from homeassistant.components.climate.const import HVACMode
 from homeassistant.util import dt as dt_util
 
+from .const import (
+    CONF_LEARNING_MODEL,
+    DEFAULT_LEARNING_MODEL,
+    LEARNING_MODEL_LABELS,
+    LEARNING_MODEL_LINEAR,
+)
 from .optimizer import DEFAULT_LEARNING_SWITCH_CONFIG, LearningSwitchOptimizer
 from .storage import LearningEntryPayload, build_entry_payload
 
@@ -99,6 +105,9 @@ class ThermostatConfig:
                 **DEFAULT_LEARNING_SWITCH_CONFIG,
                 "lookahead_steps": int(data["learning_lookahead_steps"]),
                 "history_steps": int(data["learning_history_steps"]),
+                "learning_model": _normalize_learning_model(
+                    data.get(CONF_LEARNING_MODEL)
+                ),
                 "l2_reg": float(data["learning_l2_reg"]),
                 "error_decay": float(data["learning_error_decay"]),
                 "learning_rate": float(data["learning_rate"]),
@@ -364,6 +373,14 @@ def _coerce_optional_str(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _normalize_learning_model(value: Any) -> str:
+    """Normalize a config-entry learning model identifier."""
+    model = str(value or DEFAULT_LEARNING_MODEL)
+    if model not in LEARNING_MODEL_LABELS:
+        return LEARNING_MODEL_LINEAR
+    return model
 
 
 def _coerce_float(value: Any) -> float | None:

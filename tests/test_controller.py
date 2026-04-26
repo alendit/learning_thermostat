@@ -11,6 +11,7 @@ from custom_components.learning_thermostat.controller import (
     ThermostatConfig,
     ThermostatController,
 )
+from custom_components.learning_thermostat.const import LEARNING_MODEL_PHYSICAL
 
 
 class StubOptimizer:
@@ -80,6 +81,31 @@ def _config() -> ThermostatConfig:
         lookahead_steps=8,
         learning_config={"history_steps": 6, "lookahead_steps": 8},
     )
+
+
+def test_config_from_mapping_passes_learning_model_to_optimizer_config() -> None:
+    """Config mapping should keep Home Assistant glue thin for model selection."""
+    data = {
+        "name": "Kitchen Floor",
+        "underlying_entity_ids": ["switch.floor_a"],
+        "temperature_sensor_entity_id": "sensor.kitchen_temperature",
+        "outdoor_entity_id": "weather.home",
+        "cycle_minutes": 15,
+        "min_temperature": 15.0,
+        "max_temperature": 28.0,
+        "target_temperature": 21.5,
+        "learning_lookahead_steps": 8,
+        "learning_history_steps": 6,
+        "learning_l2_reg": 0.001,
+        "learning_error_decay": 0.9,
+        "learning_rate": 0.005,
+        "learning_energy": 0.01,
+        "learning_model": LEARNING_MODEL_PHYSICAL,
+    }
+
+    config = ThermostatConfig.from_mapping(name="Kitchen Floor", data=data)
+
+    assert config.learning_config["learning_model"] == LEARNING_MODEL_PHYSICAL
 
 
 @pytest.mark.asyncio

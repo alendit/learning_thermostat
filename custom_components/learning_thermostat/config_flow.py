@@ -23,6 +23,7 @@ from .const import (
     CONF_LEARNING_HISTORY_STEPS,
     CONF_LEARNING_L2_REG,
     CONF_LEARNING_LOOKAHEAD_STEPS,
+    CONF_LEARNING_MODEL,
     CONF_LEARNING_RATE,
     CONF_MAX_TEMPERATURE,
     CONF_MIN_TEMPERATURE,
@@ -32,11 +33,14 @@ from .const import (
     CONF_TEMPERATURE_SENSOR_ENTITY_ID,
     CONF_UNDERLYING_ENTITY_IDS,
     DEFAULT_CYCLE_MINUTES,
+    DEFAULT_LEARNING_MODEL,
     DEFAULT_MAX_TEMPERATURE,
     DEFAULT_MIN_TEMPERATURE,
     DEFAULT_NAME,
     DEFAULT_TARGET_TEMPERATURE,
     DOMAIN,
+    LEARNING_MODEL_LABELS,
+    LEARNING_MODEL_LINEAR,
 )
 from .optimizer import DEFAULT_LEARNING_SWITCH_CONFIG
 
@@ -46,6 +50,10 @@ def _normalize_input(data: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(data)
     normalized["name"] = str(data["name"]).strip() or DEFAULT_NAME
     normalized[CONF_UNDERLYING_ENTITY_IDS] = list(data[CONF_UNDERLYING_ENTITY_IDS])
+    learning_model = str(data.get(CONF_LEARNING_MODEL) or DEFAULT_LEARNING_MODEL)
+    if learning_model not in LEARNING_MODEL_LABELS:
+        learning_model = LEARNING_MODEL_LINEAR
+    normalized[CONF_LEARNING_MODEL] = learning_model
 
     for key in (
         CONF_CYCLE_MINUTES,
@@ -205,6 +213,18 @@ def _schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
                     max=48,
                     step=1,
                     mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Required(
+                CONF_LEARNING_MODEL,
+                default=defaults.get(CONF_LEARNING_MODEL, DEFAULT_LEARNING_MODEL),
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[
+                        selector.SelectOptionDict(value=value, label=label)
+                        for value, label in LEARNING_MODEL_LABELS.items()
+                    ],
+                    mode=selector.SelectSelectorMode.DROPDOWN,
                 )
             ),
             vol.Required(

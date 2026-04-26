@@ -15,6 +15,7 @@ from custom_components.learning_thermostat.const import (
     CONF_LEARNING_HISTORY_STEPS,
     CONF_LEARNING_L2_REG,
     CONF_LEARNING_LOOKAHEAD_STEPS,
+    CONF_LEARNING_MODEL,
     CONF_LEARNING_RATE,
     CONF_MAX_TEMPERATURE,
     CONF_MIN_TEMPERATURE,
@@ -22,7 +23,9 @@ from custom_components.learning_thermostat.const import (
     CONF_TARGET_TEMPERATURE,
     CONF_TEMPERATURE_SENSOR_ENTITY_ID,
     CONF_UNDERLYING_ENTITY_IDS,
+    DEFAULT_LEARNING_MODEL,
     DOMAIN,
+    LEARNING_MODEL_PHYSICAL,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -61,6 +64,7 @@ async def test_user_flow_creates_entry(hass) -> None:
         "switch.floor_a",
         "switch.floor_b",
     ]
+    assert result["data"][CONF_LEARNING_MODEL] == DEFAULT_LEARNING_MODEL
 
 
 async def test_user_flow_without_input_shows_form(hass) -> None:
@@ -102,6 +106,57 @@ async def test_schema_allows_weather_or_sensor_for_outdoor_source() -> None:
 
     assert isinstance(entity_selector, selector.EntitySelector)
     assert entity_selector.config["domain"] == ["weather", "sensor"]
+
+
+async def test_schema_exposes_learning_model_choices() -> None:
+    """The form should expose Linear and Physical learning model choices."""
+    schema = _schema()
+
+    field = next(
+        key
+        for key in schema.schema
+        if getattr(key, "schema", None) == CONF_LEARNING_MODEL
+    )
+    model_selector = schema.schema[field]
+
+    assert isinstance(model_selector, selector.SelectSelector)
+    assert model_selector.config["options"] == [
+        {"value": "linear", "label": "Linear"},
+        {"value": "physical", "label": "Physical"},
+    ]
+
+
+async def test_user_flow_accepts_physical_learning_model(hass) -> None:
+    """The selected learning model should be persisted in config entry data."""
+    user_input = {**_user_input(), CONF_LEARNING_MODEL: LEARNING_MODEL_PHYSICAL}
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": "user"},
+        data=user_input,
+    )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_LEARNING_MODEL] == LEARNING_MODEL_PHYSICAL
+
+
+async def test_options_flow_can_switch_learning_model(hass) -> None:
+    """The options flow should update entry data with the selected model."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Kitchen Floor",
+        data=_user_input(),
+        unique_id="switch_floor_a_switch_floor_b",
+    )
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(
+        entry.entry_id,
+        data={**_user_input(), CONF_LEARNING_MODEL: LEARNING_MODEL_PHYSICAL},
+    )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.data[CONF_LEARNING_MODEL] == LEARNING_MODEL_PHYSICAL
 
 
 async def test_user_flow_rejects_duplicate_switch_set(hass) -> None:
