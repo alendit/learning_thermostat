@@ -58,8 +58,12 @@ placement, interface design, and testability.
 - Separate the domain logic from Home Assistant integration glue.
 - Keep thermostat decision logic, learning behavior, and state handling in
   focused modules with clear responsibilities.
+- Put use-case orchestration in application services rather than in entities,
+  setup functions, service handlers, UI, transport, webhook, or tool glue.
 - Treat entities, service registration, setup code, and config flow as adapter
   layers around the core behavior.
+- Keep side effects at adapter boundaries, and pass their results into core
+  logic as explicit inputs.
 - Avoid large utility modules that accumulate unrelated logic.
 - Avoid hidden cross-module state.
 - Pass dependencies explicitly where practical.
@@ -74,8 +78,9 @@ this repository, not with a hypothetical future need.
 - Keep core policy and decision logic isolated from side effects.
 - Keep dependencies flowing from unstable code toward stable code.
 - Do not mix unrelated domains into one coordinating component.
-- Prefer application services over putting business logic into entities,
-  config flow, service handlers, or other Home Assistant adapter code.
+- Prefer application services over putting business logic into entities, config
+  flow, service handlers, UI, transport, webhook, tool handlers, or other
+  adapter code.
 - Do not introduce abstraction unless it makes a concrete likely change easier.
 - Do not create shared interfaces that implementations can only satisfy by
   narrowing behavior, ignoring requirements, or throwing.
