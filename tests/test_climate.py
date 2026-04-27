@@ -55,6 +55,29 @@ def _entry() -> MockConfigEntry:
     )
 
 
+def _living_entry() -> MockConfigEntry:
+    return MockConfigEntry(
+        domain=DOMAIN,
+        title="Living Floor",
+        data={
+            "name": "Living Floor",
+            CONF_UNDERLYING_ENTITY_IDS: ["switch.living_floor"],
+            CONF_TEMPERATURE_SENSOR_ENTITY_ID: "sensor.living_temperature",
+            CONF_OUTDOOR_ENTITY_ID: "sensor.outside_temperature",
+            CONF_CYCLE_MINUTES: 15,
+            CONF_TARGET_TEMPERATURE: 21.5,
+            CONF_MIN_TEMPERATURE: 15.0,
+            CONF_MAX_TEMPERATURE: 28.0,
+            CONF_LEARNING_LOOKAHEAD_STEPS: 8,
+            CONF_LEARNING_HISTORY_STEPS: 6,
+            CONF_LEARNING_L2_REG: 0.001,
+            CONF_LEARNING_ERROR_DECAY: 0.9,
+            CONF_LEARNING_RATE: 0.005,
+            CONF_LEARNING_ENERGY: 0.01,
+        },
+    )
+
+
 async def test_trigger_tick_turns_on_switches_when_heat_is_needed(hass) -> None:
     """A forced tick should turn on all configured switches."""
     hass.states.async_set("sensor.kitchen_temperature", "18.0")
@@ -85,6 +108,43 @@ async def test_trigger_tick_turns_on_switches_when_heat_is_needed(hass) -> None:
     state = hass.states.get("climate.kitchen_floor")
     assert state is not None
     assert state.attributes["learning_state"] is not None
+
+
+async def test_entity_services_target_all_learning_thermostat_entries(hass) -> None:
+    """Integration entity services should work for entries set up after the first."""
+    hass.states.async_set("sensor.kitchen_temperature", "22.0")
+    hass.states.async_set("sensor.living_temperature", "18.0")
+    hass.states.async_set("sensor.outside_temperature", "7.0")
+    hass.states.async_set("switch.floor_a", "off")
+    hass.states.async_set("switch.floor_b", "off")
+    hass.states.async_set("switch.living_floor", "off")
+    turn_on_calls = async_mock_service(hass, "switch", "turn_on")
+    async_mock_service(hass, "switch", "turn_off")
+
+    kitchen_entry = _entry()
+    living_entry = _living_entry()
+    kitchen_entry.add_to_hass(hass)
+    living_entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(kitchen_entry.entry_id)
+    await hass.async_block_till_done()
+
+    await hass.services.async_call(
+        DOMAIN,
+        SERVICE_TRIGGER_TICK,
+        {"entity_id": "climate.living_floor", "force": True},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+
+    assert [call.data["entity_id"] for call in turn_on_calls] == [
+        "switch.living_floor"
+    ]
+    kitchen_state = hass.states.get("climate.kitchen_floor")
+    living_state = hass.states.get("climate.living_floor")
+    assert kitchen_state is not None
+    assert living_state is not None
+    assert kitchen_state.attributes["learning_result"] is None
+    assert living_state.attributes["learning_result"] is not None
 
 
 async def test_hvac_off_turns_off_switches(hass) -> None:

@@ -33,7 +33,6 @@ from homeassistant.core import (
 )
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers import service as hass_service
 from homeassistant.helpers.entity_platform import (
     AddEntitiesCallback,
     async_get_current_platform,
@@ -698,26 +697,18 @@ def _async_ensure_entity_services_registered(hass: HomeAssistant) -> None:
         return
 
     platform = async_get_current_platform()
-    hass_service.async_register_entity_service(
-        hass,
-        DOMAIN,
+    platform.async_register_entity_service(
         SERVICE_RESET_LEARNING,
-        entities=platform.entities,
-        func="async_reset_learning_service",
-        job_type=None,
         schema={
             vol.Optional("preserve_history", default=True): cv.boolean,
         },
+        func="async_reset_learning_service",
     )
-    hass_service.async_register_entity_service(
-        hass,
-        DOMAIN,
+    platform.async_register_entity_service(
         SERVICE_TRIGGER_TICK,
-        entities=platform.entities,
-        func="async_trigger_tick_service",
-        job_type=None,
         schema={
             vol.Optional("force", default=False): cv.boolean,
         },
+        func="async_trigger_tick_service",
     )
     data[DATA_SERVICES_REGISTERED] = True
