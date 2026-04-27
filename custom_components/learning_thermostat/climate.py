@@ -13,9 +13,7 @@ from homeassistant.components.climate.const import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
-    ATTR_ENTITY_ID,
     ATTR_TEMPERATURE,
-    STATE_ON,
 )
 from homeassistant.core import (
     Event,
@@ -53,6 +51,7 @@ from .runtime import LearningThermostatRuntime, async_get_or_create_runtime
 from .services import async_ensure_entity_services_registered
 from .state import LearningEntryPayload, ThermostatMode
 from .storage import LearningStateStore
+from .switches import any_switch_active, async_turn_switches
 
 
 async def async_setup_entry(
@@ -132,7 +131,11 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
         """Return the current HVAC action."""
         if self._controller.hvac_mode == ThermostatMode.OFF:
             return HVACAction.OFF
-        return HVACAction.HEATING if self._is_any_switch_active() else HVACAction.IDLE
+        return (
+            HVACAction.HEATING
+            if any_switch_active(self.hass, self._config.switch_entity_ids)
+            else HVACAction.IDLE
+        )
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -350,7 +353,9 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
             solar_forecast=solar_forecast,
             solar_sample=self._controller.current_solar_sample,
             solar_sample_forecast=solar_sample_forecast,
-            current_switch_active=self._is_any_switch_active(),
+            current_switch_active=any_switch_active(
+                self.hass, self._config.switch_entity_ids
+            ),
             turn_switches=self._async_turn_all_switches,
             persist=self._async_persist_learning_state_payload,
         )
@@ -372,22 +377,7 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
 
     async def _async_turn_all_switches(self, turn_on: bool) -> None:
         """Turn all configured switch entities on or off."""
-        service = "turn_on" if turn_on else "turn_off"
-        for entity_id in self._config.switch_entity_ids:
-            await self.hass.services.async_call(
-                entity_id.split(".", 1)[0],
-                service,
-                {ATTR_ENTITY_ID: entity_id},
-                blocking=True,
-            )
-
-    def _is_any_switch_active(self) -> bool:
-        """Return whether any configured switch is currently on."""
-        for entity_id in self._config.switch_entity_ids:
-            state = self.hass.states.get(entity_id)
-            if state is not None and state.state == STATE_ON:
-                return True
-        return False
+        await async_turn_switches(self.hass, self._config.switch_entity_ids, turn_on)
 
     @property
     def _forecast_entity_id(self) -> str | None:
