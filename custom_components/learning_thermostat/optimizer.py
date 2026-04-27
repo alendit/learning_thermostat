@@ -35,12 +35,11 @@ from .optimizer_features import (
     feature_size,
     heat_feature_count,
     init_weights,
-    pad_sequence,
     physical_filter_delta,
-    sanitize_array,
     solar_profile_size,
     u_weight_start,
 )
+from .optimizer_history import build_history_arrays, update_latest_first_histories
 from .optimizer_planning import (
     effective_solar_orientation,
     find_start_stop,
@@ -85,7 +84,6 @@ from .optimizer_tracking import (
 )
 from .solar import (
     SOLAR_ORIENTATION_FEATURE_SIZE,
-    build_solar_orientation_features,
     coerce_solar_sample,
     diffuse_only_sample,
 )
@@ -500,90 +498,18 @@ class LearningSwitchOptimizer:
         self._weights[start:end] = np.maximum(self._weights[start:end], floor)
         return not np.allclose(before, self._weights[start:end], rtol=0.0, atol=1e-12)
 
-    def _update_history(
-        self,
-        t_room: float,
-        t_out: float,
-        u_actual: int,
-        solar: float | None,
-        solar_sample: dict[str, Any] | None,
-    ) -> None:
-        """Maintain fixed-length history buffers for model inputs."""
-        self._t_hist.insert(0, float(t_room))
-        self._out_hist.insert(0, float(t_out))
-        if self._use_solar_feature:
-            if solar is None:
-                solar_value = self._solar_hist[0] if self._solar_hist else 0.0
-            else:
-                solar_value = float(solar)
-            self._solar_hist.insert(0, solar_value)
-            sample_value = coerce_solar_sample(solar_sample, solar_value)
-            self._solar_sample_hist.insert(0, sample_value.as_dict())
-        self._u_hist.insert(0, int(u_actual))
-        if len(self._t_hist) > self._history_steps:
-            self._t_hist = self._t_hist[: self._history_steps]
-        if len(self._out_hist) > self._history_steps:
-            self._out_hist = self._out_hist[: self._history_steps]
-        if len(self._solar_hist) > self._history_steps:
-            self._solar_hist = self._solar_hist[: self._history_steps]
-        if len(self._solar_sample_hist) > self._history_steps:
-            self._solar_sample_hist = self._solar_sample_hist[: self._history_steps]
-        if len(self._u_hist) > self._history_steps:
-            self._u_hist = self._u_hist[: self._history_steps]
-
-    def _history_arrays(
-        self,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray]:
-        """Build sanitized fixed-length history arrays for the model."""
-        t_pad = pad_sequence(
-            self._t_hist,
-            self._t_hist[-1] if self._t_hist else 0.0,
-            history_steps=self._history_steps,
-        )
-        out_pad = pad_sequence(
-            self._out_hist,
-            self._out_hist[-1] if self._out_hist else 0.0,
-            history_steps=self._history_steps,
-        )
-        solar_pad: np.ndarray | None = None
-        if self._use_solar_feature:
-            sample_rows = self._solar_sample_hist
-            if not sample_rows and self._solar_hist:
-                sample_rows = [
-                    diffuse_only_sample(value).as_dict() for value in self._solar_hist
-                ]
-            if sample_rows:
-                rows = [
-                    list(
-                        build_solar_orientation_features(
-                            coerce_solar_sample(row),
-                            self._effective_solar_orientation(),
-                        )
-                    )
-                    for row in sample_rows
-                ]
-                if len(rows) < self._history_steps:
-                    rows.extend([rows[-1]] * (self._history_steps - len(rows)))
-                solar_pad = np.array(rows[: self._history_steps], dtype=float)
-            else:
-                solar_pad = np.zeros(
-                    (self._history_steps, SOLAR_ORIENTATION_FEATURE_SIZE), dtype=float
-                )
-        u_pad = pad_sequence(
-            [float(v) for v in self._u_hist],
-            0.0,
-            history_steps=self._history_steps,
-        )
-        return (
-            sanitize_array(t_pad),
-            sanitize_array(out_pad),
-            sanitize_array(solar_pad) if solar_pad is not None else None,
-            sanitize_array(u_pad),
-        )
-
     def weight_contributions(self, u_value: int | None = None) -> np.ndarray:
         """Return absolute per-weight contributions for the next-step prediction."""
-        t_hist, out_hist, solar_hist, u_hist = self._history_arrays()
+        t_hist, out_hist, solar_hist, u_hist = build_history_arrays(
+            t_hist=self._t_hist,
+            out_hist=self._out_hist,
+            solar_hist=self._solar_hist,
+            solar_sample_hist=self._solar_sample_hist,
+            u_hist=self._u_hist,
+            history_steps=self._history_steps,
+            use_solar_feature=self._use_solar_feature,
+            solar_orientation=self._effective_solar_orientation(),
+        )
         if u_value is None:
             if self._u_hist:
                 u_value = int(self._u_hist[0])
@@ -983,10 +909,36 @@ class LearningSwitchOptimizer:
                 solar_sample if solar_sample is not None else solar_profile,
                 solar_current,
             ).as_dict()
-        self._update_history(
-            t_room, t_out, u_actual, solar_current, current_solar_sample
+        (
+            self._t_hist,
+            self._out_hist,
+            self._solar_hist,
+            self._solar_sample_hist,
+            self._u_hist,
+        ) = update_latest_first_histories(
+            t_hist=self._t_hist,
+            out_hist=self._out_hist,
+            solar_hist=self._solar_hist,
+            solar_sample_hist=self._solar_sample_hist,
+            u_hist=self._u_hist,
+            history_steps=self._history_steps,
+            use_solar_feature=self._use_solar_feature,
+            t_room=t_room,
+            t_out=t_out,
+            u_actual=u_actual,
+            solar=solar_current,
+            solar_sample=current_solar_sample,
         )
-        t_hist, out_hist, solar_hist, u_hist = self._history_arrays()
+        t_hist, out_hist, solar_hist, u_hist = build_history_arrays(
+            t_hist=self._t_hist,
+            out_hist=self._out_hist,
+            solar_hist=self._solar_hist,
+            solar_sample_hist=self._solar_sample_hist,
+            u_hist=self._u_hist,
+            history_steps=self._history_steps,
+            use_solar_feature=self._use_solar_feature,
+            solar_orientation=self._effective_solar_orientation(),
+        )
 
         configured_steps = coerce_int(
             self._config.get("lookahead_steps"),

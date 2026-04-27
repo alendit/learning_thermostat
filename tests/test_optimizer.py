@@ -14,6 +14,10 @@ from custom_components.learning_thermostat.optimizer import (
     MODEL_SCHEMA_VERSION,
     LearningSwitchOptimizer,
 )
+from custom_components.learning_thermostat.optimizer_history import (
+    build_history_arrays,
+    update_latest_first_histories,
+)
 from custom_components.learning_thermostat.optimizer_tracking import (
     queue_k_step_baseline,
     queue_k_step_features,
@@ -292,6 +296,52 @@ def test_learning_update_payloads_preserve_shape_and_weight_effects() -> None:
         [0.0999998, -0.0499999, 0.0, 0.0499999]
     )
     assert optimizer._weights.tolist() == pytest.approx(multi_update["delta"])
+
+
+def test_history_helpers_update_latest_first_and_build_model_arrays() -> None:
+    """History helpers should preserve latest-first buffers and sanitized arrays."""
+    t_hist, out_hist, solar_hist, solar_sample_hist, u_hist = (
+        update_latest_first_histories(
+            t_hist=[19.0, 18.0],
+            out_hist=[5.0],
+            solar_hist=[100.0],
+            solar_sample_hist=[{"flux": 100.0, "azimuth": None, "elevation": None}],
+            u_hist=[0],
+            history_steps=2,
+            use_solar_feature=True,
+            t_room=20.0,
+            t_out=7.0,
+            u_actual=1,
+            solar=None,
+            solar_sample=None,
+        )
+    )
+
+    assert t_hist == [20.0, 19.0]
+    assert out_hist == [7.0, 5.0]
+    assert solar_hist == [100.0, 100.0]
+    assert solar_sample_hist == [
+        {"flux": 100.0, "azimuth": None, "elevation": None},
+        {"flux": 100.0, "azimuth": None, "elevation": None},
+    ]
+    assert u_hist == [1, 0]
+
+    t_array, out_array, solar_array, u_array = build_history_arrays(
+        t_hist=t_hist,
+        out_hist=out_hist,
+        solar_hist=solar_hist,
+        solar_sample_hist=solar_sample_hist,
+        u_hist=u_hist,
+        history_steps=2,
+        use_solar_feature=True,
+        solar_orientation=180.0,
+    )
+
+    assert t_array.tolist() == [20.0, 19.0]
+    assert out_array.tolist() == [7.0, 5.0]
+    assert solar_array is not None
+    assert solar_array.tolist() == [[100.0, 0.0, 0.0], [100.0, 0.0, 0.0]]
+    assert u_array.tolist() == [1.0, 0.0]
 
 
 def test_snapshot_restore_round_trip() -> None:
