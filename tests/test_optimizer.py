@@ -6,6 +6,10 @@ import numpy as np
 import pytest
 
 from custom_components.learning_thermostat.const import LEARNING_MODEL_PHYSICAL
+from custom_components.learning_thermostat.optimizer_features import (
+    build_model_feature,
+    sanitize_array,
+)
 from custom_components.learning_thermostat.optimizer import (
     MODEL_SCHEMA_VERSION,
     LearningSwitchOptimizer,
@@ -485,17 +489,14 @@ def test_physical_solar_snapshot_has_fixed_weight_count() -> None:
 
 def test_physical_features_use_fixed_scaling_trends_and_filters() -> None:
     """Physical features should avoid local z-scoring."""
-    optimizer = LearningSwitchOptimizer(
-        "zone_physical",
-        config={"history_steps": 4, "learning_model": LEARNING_MODEL_PHYSICAL},
-    )
-    optimizer._feature_step_minutes = 60.0
-
-    features = optimizer._build_model_feature(
-        t_hist=optimizer._sanitize_array(np.array([22.0, 21.0, 20.0, 19.0])),
-        out_hist=optimizer._sanitize_array(np.array([12.0, 10.0, 8.0, 6.0])),
+    features = build_model_feature(
+        learning_model=LEARNING_MODEL_PHYSICAL,
+        history_decay_vector=np.ones(4, dtype=float),
+        feature_step_minutes=60.0,
+        t_hist=sanitize_array(np.array([22.0, 21.0, 20.0, 19.0])),
+        out_hist=sanitize_array(np.array([12.0, 10.0, 8.0, 6.0])),
         solar_hist=None,
-        u_hist=optimizer._sanitize_array(np.array([1.0, 0.0, 0.0, 0.0])),
+        u_hist=sanitize_array(np.array([1.0, 0.0, 0.0, 0.0])),
     )
 
     assert features[:6].tolist() == pytest.approx([0.2, 0.1, 0.5, 0.5, 0.75, 0.6])
