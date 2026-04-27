@@ -3,16 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from .const import (
-    CONF_LEARNING_MODEL,
-    DEFAULT_LEARNING_MODEL,
-    LEARNING_MODEL_LABELS,
-    LEARNING_MODEL_LINEAR,
-)
+from .config_contract import ThermostatConfig
 from .optimizer import DEFAULT_LEARNING_SWITCH_CONFIG, LearningSwitchOptimizer
 from .optimizer_orientation import unknown_solar_orientation_diagnostics
 from .optimizer_types import OptimizerTickResult, SolarOrientationDiagnostics
@@ -33,67 +27,6 @@ def _default_optimizer_factory(
 ) -> LearningSwitchOptimizer:
     """Build the concrete optimizer dependency."""
     return LearningSwitchOptimizer(name, config=config)
-
-
-@dataclass(frozen=True, slots=True)
-class ThermostatConfig:
-    """Stable runtime config for one thermostat entry."""
-
-    name: str
-    switch_entity_ids: tuple[str, ...]
-    temperature_sensor_entity_id: str
-    outdoor_entity_id: str | None
-    legacy_forecast_entity_id: str | None
-    cycle_minutes: int
-    min_temperature: float
-    max_temperature: float
-    target_temperature: float
-    lookahead_steps: int
-    learning_config: dict[str, Any]
-
-    @classmethod
-    def from_mapping(cls, *, name: str, data: dict[str, Any]) -> ThermostatConfig:
-        """Build config from one config-entry payload."""
-        outdoor_entity_id = _coerce_optional_str(data.get("outdoor_entity_id"))
-        legacy_forecast_entity_id = _coerce_optional_str(data.get("forecast_entity_id"))
-        if outdoor_entity_id is None:
-            outdoor_entity_id = _coerce_optional_str(
-                data.get("outdoor_temperature_sensor_entity_id")
-            )
-        if (
-            outdoor_entity_id is None
-            and legacy_forecast_entity_id
-            and legacy_forecast_entity_id.startswith("weather.")
-        ):
-            outdoor_entity_id = legacy_forecast_entity_id
-
-        return cls(
-            name=name,
-            switch_entity_ids=tuple(
-                str(value) for value in data["underlying_entity_ids"]
-            ),
-            temperature_sensor_entity_id=str(data["temperature_sensor_entity_id"]),
-            outdoor_entity_id=outdoor_entity_id,
-            legacy_forecast_entity_id=legacy_forecast_entity_id,
-            cycle_minutes=int(data["cycle_minutes"]),
-            min_temperature=float(data["min_temperature"]),
-            max_temperature=float(data["max_temperature"]),
-            target_temperature=float(data["target_temperature"]),
-            lookahead_steps=int(data["learning_lookahead_steps"]),
-            learning_config={
-                **DEFAULT_LEARNING_SWITCH_CONFIG,
-                "lookahead_steps": int(data["learning_lookahead_steps"]),
-                "history_steps": int(data["learning_history_steps"]),
-                "learning_model": _normalize_learning_model(
-                    data.get(CONF_LEARNING_MODEL)
-                ),
-                "l2_reg": float(data["learning_l2_reg"]),
-                "error_decay": float(data["learning_error_decay"]),
-                "learning_rate": float(data["learning_rate"]),
-                "w_energy": float(data["learning_energy"]),
-                "use_solar_feature": bool(data.get("solar_entity_id")),
-            },
-        )
 
 
 class ThermostatController:
@@ -366,22 +299,6 @@ class ThermostatController:
             if self._learning_state is not None:
                 self._optimizer.restore_state(self._learning_state)
         return self._optimizer
-
-
-def _coerce_optional_str(value: Any) -> str | None:
-    """Return a trimmed string or None."""
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
-
-
-def _normalize_learning_model(value: Any) -> str:
-    """Normalize a config-entry learning model identifier."""
-    model = str(value or DEFAULT_LEARNING_MODEL)
-    if model not in LEARNING_MODEL_LABELS:
-        return LEARNING_MODEL_LINEAR
-    return model
 
 
 def _coerce_float(value: Any) -> float | None:

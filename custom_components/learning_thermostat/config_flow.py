@@ -40,51 +40,9 @@ from .const import (
     DEFAULT_TARGET_TEMPERATURE,
     DOMAIN,
     LEARNING_MODEL_LABELS,
-    LEARNING_MODEL_LINEAR,
 )
+from .config_contract import normalize_config_entry_data
 from .optimizer import DEFAULT_LEARNING_SWITCH_CONFIG
-
-
-def _normalize_input(data: dict[str, Any]) -> dict[str, Any]:
-    """Normalize one form payload."""
-    normalized = dict(data)
-    normalized["name"] = str(data["name"]).strip() or DEFAULT_NAME
-    normalized[CONF_UNDERLYING_ENTITY_IDS] = list(data[CONF_UNDERLYING_ENTITY_IDS])
-    learning_model = str(data.get(CONF_LEARNING_MODEL) or DEFAULT_LEARNING_MODEL)
-    if learning_model not in LEARNING_MODEL_LABELS:
-        learning_model = LEARNING_MODEL_LINEAR
-    normalized[CONF_LEARNING_MODEL] = learning_model
-
-    for key in (
-        CONF_CYCLE_MINUTES,
-        CONF_LEARNING_LOOKAHEAD_STEPS,
-        CONF_LEARNING_HISTORY_STEPS,
-    ):
-        normalized[key] = int(data[key])
-
-    for key in (
-        CONF_TARGET_TEMPERATURE,
-        CONF_MIN_TEMPERATURE,
-        CONF_MAX_TEMPERATURE,
-        CONF_LEARNING_L2_REG,
-        CONF_LEARNING_ERROR_DECAY,
-        CONF_LEARNING_RATE,
-        CONF_LEARNING_ENERGY,
-    ):
-        normalized[key] = float(data[key])
-
-    for optional_key in (
-        CONF_OUTDOOR_ENTITY_ID,
-        CONF_OUTDOOR_TEMPERATURE_SENSOR_ENTITY_ID,
-        CONF_FORECAST_ENTITY_ID,
-    ):
-        value = data.get(optional_key)
-        if value:
-            normalized[optional_key] = str(value)
-        else:
-            normalized.pop(optional_key, None)
-
-    return normalized
 
 
 def _entry_unique_id(data: dict[str, Any]) -> str:
@@ -303,7 +261,7 @@ class LearningThermostatConfigFlow(ConfigFlow, domain=DOMAIN):
         """Handle the initial step."""
         errors: dict[str, str] = {}
         if user_input is not None:
-            normalized = _normalize_input(user_input)
+            normalized = normalize_config_entry_data(user_input)
             unique_id = _entry_unique_id(normalized)
 
             await self.async_set_unique_id(unique_id)
@@ -333,7 +291,7 @@ class LearningThermostatOptionsFlow(OptionsFlowWithReload):
         """Handle options editing."""
         errors: dict[str, str] = {}
         if user_input is not None:
-            normalized = _normalize_input(user_input)
+            normalized = normalize_config_entry_data(user_input)
             unique_id = _entry_unique_id(normalized)
 
             if _other_entry_uses_switches(

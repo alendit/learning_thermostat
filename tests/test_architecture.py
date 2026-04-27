@@ -7,6 +7,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CORE_MODULES = [
     "attributes.py",
+    "config_contract.py",
     "controller.py",
     "optimizer.py",
     "optimizer_features.py",

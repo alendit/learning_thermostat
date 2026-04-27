@@ -8,8 +8,9 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
+from .config_contract import ThermostatConfig
 from .const import DATA_RUNTIMES, DOMAIN
-from .controller import ThermostatConfig, ThermostatController
+from .controller import ThermostatController
 
 
 @dataclass(slots=True)
