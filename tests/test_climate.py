@@ -9,7 +9,7 @@ from pytest_homeassistant_custom_component.common import (
     async_mock_service,
 )
 
-from custom_components.learning_thermostat import climate as climate_module
+from custom_components.learning_thermostat import environment as environment_module
 from custom_components.learning_thermostat.const import (
     CONF_CYCLE_MINUTES,
     CONF_LEARNING_ENERGY,
@@ -234,7 +234,7 @@ async def test_weather_entity_provides_current_and_forecast_outdoor_temperature(
         }
 
     monkeypatch.setattr(
-        climate_module, "async_weather_get_forecast", fake_weather_forecast
+        environment_module, "async_weather_get_forecast", fake_weather_forecast
     )
 
     entry = MockConfigEntry(
@@ -314,7 +314,7 @@ async def test_detect_pirate_weather_solar_entities(hass) -> None:
         translation_key="solar_max",
     )
 
-    detected = climate_module._detect_pirate_weather_solar_entities(
+    detected = environment_module.detect_pirate_weather_solar_entities(
         hass, weather_entry.entity_id
     )
 
@@ -364,7 +364,7 @@ async def test_detect_pirate_weather_live_entity_names(hass) -> None:
         original_name="PirateWeather Downward Short-Wave Radiation Flux Max",
     )
 
-    detected = climate_module._detect_pirate_weather_solar_entities(
+    detected = environment_module.detect_pirate_weather_solar_entities(
         hass, weather_entry.entity_id
     )
 
@@ -431,9 +431,11 @@ async def test_pirate_weather_solar_uses_sun_position_for_samples(
     async_mock_service(hass, "switch", "turn_off")
 
     monkeypatch.setattr(
-        climate_module,
-        "_solar_position_at",
-        lambda _hass, _when: climate_module.SunPosition(azimuth=180.0, elevation=45.0),
+        environment_module,
+        "solar_position_at",
+        lambda _hass, _when: environment_module.SunPosition(
+            azimuth=180.0, elevation=45.0
+        ),
     )
 
     entry = MockConfigEntry(
