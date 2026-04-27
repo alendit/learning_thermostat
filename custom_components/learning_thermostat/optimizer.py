@@ -73,6 +73,16 @@ from .optimizer_state import (
     restore_solar_sample_history,
     snapshot_model_id,
 )
+from .optimizer_tracking import (
+    DYNAMIC_LOOKAHEAD_TOLERANCE,
+    clear_pending_predictions,
+    k_step_error_stats,
+    queue_k_step_baseline,
+    queue_k_step_features,
+    queue_k_step_predictions,
+    record_k_step_errors,
+    select_dynamic_lookahead,
+)
 from .solar import (
     SOLAR_ORIENTATION_FEATURE_SIZE,
     build_solar_orientation_features,
@@ -82,11 +92,9 @@ from .solar import (
 
 DYNAMIC_LOOKAHEAD_MIN = 12
 DYNAMIC_LOOKAHEAD_MAX = 24
-DYNAMIC_LOOKAHEAD_TOLERANCE = 0.2
 LEARNING_RATE_TARGET_ERROR = 0.2
 LEARNING_RATE_SCALE_MIN = 0.2
 LEARNING_RATE_SCALE_MAX = 2.0
-MULTI_STEP_UPDATE_HORIZON = 3
 U_WEIGHT_MIN = 1e-6
 SOLAR_ORIENTATION_GRID_DEGREES = 5
 SOLAR_ORIENTATION_MIN_EXAMPLES = 8
@@ -409,7 +417,12 @@ class LearningSwitchOptimizer:
                 )
             else:
                 self._prev_feature = None
-                self._clear_pending_predictions()
+                clear_pending_predictions(
+                    pending_preds=self._pending_k_step_preds,
+                    pending_features=self._pending_k_step_features,
+                    pending_baseline=self._pending_k_step_baseline,
+                )
+                self._prev_orientation_input = None
         except Exception as exc:  # noqa: BLE001 - keep restore resilient
             _LOGGER.warning("%s - Learning state restore failed: %s", self._name, exc)
 
@@ -486,218 +499,6 @@ class LearningSwitchOptimizer:
         before = self._weights[start:end].copy()
         self._weights[start:end] = np.maximum(self._weights[start:end], floor)
         return not np.allclose(before, self._weights[start:end], rtol=0.0, atol=1e-12)
-
-    def _clear_pending_predictions(self) -> None:
-        """Drop pending learning rows whose feature semantics may be stale."""
-        self._pending_k_step_preds.clear()
-        self._pending_k_step_features.clear()
-        self._pending_k_step_baseline.clear()
-        self._prev_feature = None
-        self._prev_orientation_input = None
-
-    def _record_k_step_errors(
-        self, actual_temp: float, step_index: int
-    ) -> tuple[dict[int, float], list[dict[str, float | int | list[float]]]]:
-        """Update k-step error stats and return absolute errors plus update inputs."""
-        errors: dict[int, float] = {}
-        updates: list[dict[str, float | int | list[float]]] = []
-        if self._pending_k_step_preds:
-            stale_steps = [
-                key for key in self._pending_k_step_preds if key < step_index
-            ]
-            for key in stale_steps:
-                self._pending_k_step_preds.pop(key, None)
-        if self._pending_k_step_features:
-            stale_steps = [
-                key for key in self._pending_k_step_features if key < step_index
-            ]
-            for key in stale_steps:
-                self._pending_k_step_features.pop(key, None)
-        if self._pending_k_step_baseline:
-            stale_steps = [
-                key for key in self._pending_k_step_baseline if key < step_index
-            ]
-            for key in stale_steps:
-                self._pending_k_step_baseline.pop(key, None)
-        matured = self._pending_k_step_preds.pop(step_index, None)
-        if not matured:
-            return errors, updates
-        matured_features = self._pending_k_step_features.pop(step_index, None) or {}
-        baseline_matured = self._pending_k_step_baseline.pop(step_index, None) or {}
-        for horizon, pred in matured.items():
-            try:
-                pred_val = float(pred)
-            except (TypeError, ValueError):
-                continue
-            if not np.isfinite(pred_val):
-                continue
-            signed_error = actual_temp - pred_val
-            err = abs(signed_error)
-            if not np.isfinite(err):
-                continue
-            horizon_int = int(horizon)
-            errors[horizon_int] = float(err)
-            if horizon_int <= MULTI_STEP_UPDATE_HORIZON:
-                feature = matured_features.get(horizon_int)
-                if feature is not None:
-                    updates.append(
-                        {
-                            "horizon": horizon_int,
-                            "error": float(signed_error),
-                            "feature": feature,
-                        }
-                    )
-            stats = self._k_step_abs_error_history.setdefault(
-                horizon_int, {"mean": None, "count": 0}
-            )
-            count = stats.get("count", 0)
-            mean = stats.get("mean")
-            try:
-                count_val = int(count)
-            except (TypeError, ValueError):
-                count_val = 0
-            try:
-                mean_val = float(mean) if mean is not None else None
-            except (TypeError, ValueError):
-                mean_val = None
-            if mean_val is None or count_val <= 0:
-                mean_val = float(err)
-                count_val = 1
-            else:
-                mean_val = (mean_val * count_val + float(err)) / float(count_val + 1)
-                count_val += 1
-            stats["mean"] = mean_val
-            stats["count"] = count_val
-            baseline_pred = baseline_matured.get(horizon)
-            if baseline_pred is not None:
-                try:
-                    baseline_val = float(baseline_pred)
-                except (TypeError, ValueError):
-                    baseline_val = None
-                if baseline_val is not None and np.isfinite(baseline_val):
-                    baseline_err = abs(actual_temp - baseline_val)
-                    if np.isfinite(baseline_err):
-                        improvement = float(baseline_err - err)
-                        imp_stats = self._k_step_pred_improvement_history.setdefault(
-                            horizon_int, {"mean": None, "count": 0}
-                        )
-                        imp_count = imp_stats.get("count", 0)
-                        imp_mean = imp_stats.get("mean")
-                        try:
-                            imp_count_val = int(imp_count)
-                        except (TypeError, ValueError):
-                            imp_count_val = 0
-                        try:
-                            imp_mean_val = (
-                                float(imp_mean) if imp_mean is not None else None
-                            )
-                        except (TypeError, ValueError):
-                            imp_mean_val = None
-                        if imp_mean_val is None or imp_count_val <= 0:
-                            imp_mean_val = improvement
-                            imp_count_val = 1
-                        else:
-                            imp_mean_val = (
-                                imp_mean_val * imp_count_val + improvement
-                            ) / float(imp_count_val + 1)
-                            imp_count_val += 1
-                        imp_stats["mean"] = imp_mean_val
-                        imp_stats["count"] = imp_count_val
-        return errors, updates
-
-    def _queue_k_step_predictions(
-        self, preds: list[float], step_index: int, max_steps: int
-    ) -> None:
-        """Queue k-step predictions keyed by target step index."""
-        horizon_max = min(max_steps, len(preds))
-        if horizon_max <= 0:
-            return
-        for horizon in range(1, horizon_max + 1):
-            try:
-                pred_val = float(preds[horizon - 1])
-            except (TypeError, ValueError):
-                continue
-            if not np.isfinite(pred_val):
-                continue
-            target_step = step_index + horizon
-            bucket = self._pending_k_step_preds.setdefault(target_step, {})
-            bucket[horizon] = pred_val
-
-    def _queue_k_step_features(
-        self, features: list[np.ndarray], step_index: int, max_steps: int
-    ) -> None:
-        """Queue k-step feature vectors keyed by target step index."""
-        horizon_max = min(MULTI_STEP_UPDATE_HORIZON, max_steps, len(features))
-        if horizon_max <= 0:
-            return
-        for horizon in range(1, horizon_max + 1):
-            feature = features[horizon - 1]
-            if feature is None:
-                continue
-            target_step = step_index + horizon
-            bucket = self._pending_k_step_features.setdefault(target_step, {})
-            bucket[horizon] = feature.tolist()
-
-    def _queue_k_step_baseline(
-        self, baseline_temp: float, step_index: int, max_steps: int
-    ) -> None:
-        """Queue trivial baseline predictions keyed by target step index."""
-        try:
-            baseline_val = float(baseline_temp)
-        except (TypeError, ValueError):
-            return
-        if not np.isfinite(baseline_val):
-            return
-        for horizon in range(1, max_steps + 1):
-            target_step = step_index + horizon
-            bucket = self._pending_k_step_baseline.setdefault(target_step, {})
-            bucket[horizon] = baseline_val
-
-    def _k_step_error_stats(
-        self, max_steps: int
-    ) -> dict[int, dict[str, float | int | None]]:
-        """Return mean absolute error and count per horizon."""
-        stats: dict[int, dict[str, float | int | None]] = {}
-        for horizon in range(1, max_steps + 1):
-            values = self._k_step_abs_error_history.get(horizon)
-            if isinstance(values, dict):
-                mean = values.get("mean")
-                count = values.get("count", 0)
-                try:
-                    mean_val = float(mean) if mean is not None else None
-                except (TypeError, ValueError):
-                    mean_val = None
-                try:
-                    count_val = int(count)
-                except (TypeError, ValueError):
-                    count_val = 0
-                stats[horizon] = {"mean": mean_val, "count": count_val}
-            else:
-                stats[horizon] = {"mean": None, "count": 0}
-        return stats
-
-    def _select_dynamic_lookahead(
-        self,
-        stats: dict[int, dict[str, float | int | None]],
-        min_steps: int,
-        max_steps: int,
-    ) -> tuple[int, str]:
-        """Pick the largest horizon whose mean k-step error stays within tolerance."""
-        reason = "insufficient_data"
-        for horizon in range(max_steps, min_steps - 1, -1):
-            ok = True
-            for step in range(1, horizon + 1):
-                mean = stats.get(step, {}).get("mean")
-                if mean is None:
-                    ok = False
-                    break
-                if mean > DYNAMIC_LOOKAHEAD_TOLERANCE:
-                    ok = False
-                    reason = "above_tolerance"
-                    break
-            if ok:
-                return horizon, "within_tolerance"
-        return min_steps, reason
 
     def _update_history(
         self,
@@ -942,7 +743,13 @@ class LearningSwitchOptimizer:
         self._ensure_weights_finite()
         self._cap_u_weights()
         if changed:
-            self._clear_pending_predictions()
+            clear_pending_predictions(
+                pending_preds=self._pending_k_step_preds,
+                pending_features=self._pending_k_step_features,
+                pending_baseline=self._pending_k_step_baseline,
+            )
+            self._prev_feature = None
+            self._prev_orientation_input = None
 
     def _compute_update(
         self,
@@ -1150,7 +957,15 @@ class LearningSwitchOptimizer:
         self._cap_u_weights()
 
         step_index = self._step_count
-        k_step_errors, k_step_updates = self._record_k_step_errors(t_room, step_index)
+        k_step_errors, k_step_updates = record_k_step_errors(
+            actual_temp=t_room,
+            step_index=step_index,
+            pending_preds=self._pending_k_step_preds,
+            pending_features=self._pending_k_step_features,
+            pending_baseline=self._pending_k_step_baseline,
+            abs_error_history=self._k_step_abs_error_history,
+            pred_improvement_history=self._k_step_pred_improvement_history,
+        )
         self._record_orientation_example(t_room)
 
         solar_current: float | None = None
@@ -1181,9 +996,11 @@ class LearningSwitchOptimizer:
             DYNAMIC_LOOKAHEAD_MAX, max(DYNAMIC_LOOKAHEAD_MIN, configured_steps)
         )
         min_steps = min(DYNAMIC_LOOKAHEAD_MIN, max_steps)
-        k_step_stats = self._k_step_error_stats(max_steps)
-        steps, decision_reason = self._select_dynamic_lookahead(
-            k_step_stats, min_steps, max_steps
+        k_step_stats = k_step_error_stats(self._k_step_abs_error_history, max_steps)
+        steps, decision_reason = select_dynamic_lookahead(
+            stats=k_step_stats,
+            min_steps=min_steps,
+            max_steps=max_steps,
         )
         mean_summary = {
             horizon: (
@@ -1421,9 +1238,24 @@ class LearningSwitchOptimizer:
                 planned_states,
                 preds_next,
             )
-        self._queue_k_step_predictions(preds_for_error, step_index, max_steps)
-        self._queue_k_step_features(feats_next, step_index, max_steps)
-        self._queue_k_step_baseline(t_room, step_index, max_steps)
+        queue_k_step_predictions(
+            pending_preds=self._pending_k_step_preds,
+            preds=preds_for_error,
+            step_index=step_index,
+            max_steps=max_steps,
+        )
+        queue_k_step_features(
+            pending_features=self._pending_k_step_features,
+            features=feats_next,
+            step_index=step_index,
+            max_steps=max_steps,
+        )
+        queue_k_step_baseline(
+            pending_baseline=self._pending_k_step_baseline,
+            baseline_temp=t_room,
+            step_index=step_index,
+            max_steps=max_steps,
+        )
         if preds_next:
             self._prev_pred_history.insert(0, float(preds_next[0]))
             if len(self._prev_pred_history) > self._history_steps:

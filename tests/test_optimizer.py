@@ -14,6 +14,13 @@ from custom_components.learning_thermostat.optimizer import (
     MODEL_SCHEMA_VERSION,
     LearningSwitchOptimizer,
 )
+from custom_components.learning_thermostat.optimizer_tracking import (
+    queue_k_step_baseline,
+    queue_k_step_features,
+    queue_k_step_predictions,
+    record_k_step_errors,
+    select_dynamic_lookahead,
+)
 
 
 def test_snapshot_contract_keys_and_model_metadata_for_supported_models() -> None:
@@ -158,21 +165,21 @@ def test_deterministic_linear_tick_sequence_is_preserved() -> None:
 
 def test_k_step_tracking_records_matured_errors_and_drops_stale_predictions() -> None:
     """K-step tracking should mature only current predictions and prune stale rows."""
-    optimizer = LearningSwitchOptimizer(
-        "zone_tracking",
-        config={"history_steps": 4, "lookahead_steps": 12},
-    )
-    optimizer._pending_k_step_preds[0] = {1: 99.0}
-    optimizer._pending_k_step_features[0] = {1: [99.0]}
-    optimizer._pending_k_step_baseline[0] = {1: 99.0}
+    pending_preds = {0: {1: 99.0}}
+    pending_features = {0: {1: [99.0]}}
+    pending_baseline = {0: {1: 99.0}}
+    abs_error_history = {}
+    pred_improvement_history = {}
 
-    optimizer._queue_k_step_predictions(
-        [20.1, 20.4, float("nan")],
+    queue_k_step_predictions(
+        pending_preds=pending_preds,
+        preds=[20.1, 20.4, float("nan")],
         step_index=1,
         max_steps=3,
     )
-    optimizer._queue_k_step_features(
-        [
+    queue_k_step_features(
+        pending_features=pending_features,
+        features=[
             np.array([1.0, 2.0]),
             np.array([3.0, 4.0]),
             np.array([5.0, 6.0]),
@@ -180,37 +187,44 @@ def test_k_step_tracking_records_matured_errors_and_drops_stale_predictions() ->
         step_index=1,
         max_steps=3,
     )
-    optimizer._queue_k_step_baseline(20.0, step_index=1, max_steps=3)
+    queue_k_step_baseline(
+        pending_baseline=pending_baseline,
+        baseline_temp=20.0,
+        step_index=1,
+        max_steps=3,
+    )
 
-    errors, updates = optimizer._record_k_step_errors(20.7, step_index=3)
+    errors, updates = record_k_step_errors(
+        actual_temp=20.7,
+        step_index=3,
+        pending_preds=pending_preds,
+        pending_features=pending_features,
+        pending_baseline=pending_baseline,
+        abs_error_history=abs_error_history,
+        pred_improvement_history=pred_improvement_history,
+    )
 
-    assert 0 not in optimizer._pending_k_step_preds
-    assert 0 not in optimizer._pending_k_step_features
-    assert 0 not in optimizer._pending_k_step_baseline
+    assert 0 not in pending_preds
+    assert 0 not in pending_features
+    assert 0 not in pending_baseline
     assert errors == {2: pytest.approx(0.3)}
     assert updates == [
         {"horizon": 2, "error": pytest.approx(0.3), "feature": [3.0, 4.0]}
     ]
-    assert optimizer._k_step_abs_error_history == {
-        2: {"mean": pytest.approx(0.3), "count": 1}
-    }
-    assert optimizer._k_step_pred_improvement_history == {
-        2: {"mean": pytest.approx(0.4), "count": 1}
-    }
+    assert abs_error_history == {2: {"mean": pytest.approx(0.3), "count": 1}}
+    assert pred_improvement_history == {2: {"mean": pytest.approx(0.4), "count": 1}}
 
 
 def test_dynamic_lookahead_selection_contract() -> None:
     """Dynamic lookahead should report the same bounds and reason contract."""
-    optimizer = LearningSwitchOptimizer("zone_lookahead")
-
-    assert optimizer._select_dynamic_lookahead(
-        {1: {"mean": 0.1, "count": 1}},
+    assert select_dynamic_lookahead(
+        stats={1: {"mean": 0.1, "count": 1}},
         min_steps=2,
         max_steps=4,
     ) == (2, "insufficient_data")
 
-    assert optimizer._select_dynamic_lookahead(
-        {
+    assert select_dynamic_lookahead(
+        stats={
             1: {"mean": 0.1, "count": 1},
             2: {"mean": 0.1, "count": 1},
             3: {"mean": 0.25, "count": 1},
@@ -220,8 +234,8 @@ def test_dynamic_lookahead_selection_contract() -> None:
         max_steps=4,
     ) == (2, "within_tolerance")
 
-    assert optimizer._select_dynamic_lookahead(
-        {
+    assert select_dynamic_lookahead(
+        stats={
             1: {"mean": 0.1, "count": 1},
             2: {"mean": 0.1, "count": 1},
             3: {"mean": 0.15, "count": 1},
