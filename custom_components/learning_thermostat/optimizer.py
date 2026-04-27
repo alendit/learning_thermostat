@@ -43,6 +43,14 @@ from .optimizer_features import (
     solar_profile_size,
     u_weight_start,
 )
+from .optimizer_planning import (
+    effective_solar_orientation,
+    find_start_stop,
+    normalize_forecast,
+    normalize_solar_forecast,
+    predict_next,
+    rollout,
+)
 from .optimizer_state import (
     MODEL_SCHEMA_VERSION,
     adapt_weights,
@@ -770,50 +778,6 @@ class LearningSwitchOptimizer:
             sanitize_array(u_pad),
         )
 
-    def _predict_next(
-        self,
-        t_hist: np.ndarray,
-        out_hist: np.ndarray,
-        solar_hist: np.ndarray | None,
-        u_hist: np.ndarray,
-        u_value: int,
-        solar_value: dict[str, Any] | float | None,
-    ) -> tuple[float, np.ndarray]:
-        """Predict next room temperature for a single step and return features."""
-        u_hist_step = np.concatenate(
-            (np.array([float(u_value)], dtype=float), u_hist[:-1])
-        )
-        solar_hist_step: np.ndarray | None = None
-        if solar_hist is not None:
-            solar_step = np.array(
-                build_solar_orientation_features(
-                    coerce_solar_sample(
-                        solar_value,
-                        solar_hist[0][0] if solar_hist.size else 0.0,
-                    ),
-                    self._effective_solar_orientation(),
-                ),
-                dtype=float,
-            )
-            solar_hist_step = np.concatenate(
-                (
-                    solar_step.reshape(1, SOLAR_ORIENTATION_FEATURE_SIZE),
-                    solar_hist[:-1],
-                )
-            )
-        x = build_model_feature(
-            learning_model=self._learning_model,
-            history_decay_vector=self._history_decay_vector,
-            feature_step_minutes=self._feature_step_minutes,
-            t_hist=t_hist,
-            out_hist=out_hist,
-            solar_hist=solar_hist_step,
-            u_hist=u_hist_step,
-        )
-        delta = float(x @ self._weights)
-        t_next = float(t_hist[0] + delta)
-        return t_next, x
-
     def weight_contributions(self, u_value: int | None = None) -> np.ndarray:
         """Return absolute per-weight contributions for the next-step prediction."""
         t_hist, out_hist, solar_hist, u_hist = self._history_arrays()
@@ -939,238 +903,9 @@ class LearningSwitchOptimizer:
             ),
         }
 
-    def _rollout(
-        self,
-        t_hist: np.ndarray,
-        out_hist: np.ndarray,
-        solar_hist: np.ndarray | None,
-        u_hist: np.ndarray,
-        t_outs: list[float],
-        solar_forecast: list[dict[str, float | None]],
-        start: int,
-        stop: int,
-        steps: int,
-        capture_features: bool,
-    ) -> tuple[list[float], list[np.ndarray]]:
-        """Roll the model forward for a planned ON interval, optionally capturing features."""
-        preds: list[float] = []
-        features: list[np.ndarray] = []
-        t_hist_cur = np.array(t_hist, dtype=float)
-        out_hist_cur = np.array(out_hist, dtype=float)
-        solar_hist_cur = (
-            np.array(solar_hist, dtype=float) if solar_hist is not None else None
-        )
-        u_hist_cur = np.array(u_hist, dtype=float)
-
-        for idx in range(steps):
-            u = 1 if start <= idx < stop else 0
-            solar_value = solar_forecast[idx] if idx < len(solar_forecast) else None
-            t_next, x = self._predict_next(
-                t_hist_cur,
-                out_hist_cur,
-                solar_hist_cur,
-                u_hist_cur,
-                u,
-                solar_value,
-            )
-            preds.append(t_next)
-            if capture_features:
-                features.append(x)
-
-            t_hist_cur = np.concatenate(
-                (np.array([t_next], dtype=float), t_hist_cur[:-1])
-            )
-            out_hist_cur = np.concatenate(
-                (np.array([float(t_outs[idx])], dtype=float), out_hist_cur[:-1])
-            )
-            if solar_hist_cur is not None:
-                next_solar = np.array(
-                    build_solar_orientation_features(
-                        coerce_solar_sample(
-                            solar_value,
-                            solar_hist_cur[0][0] if solar_hist_cur.size else 0.0,
-                        ),
-                        self._effective_solar_orientation(),
-                    ),
-                    dtype=float,
-                )
-                solar_hist_cur = np.concatenate(
-                    (
-                        next_solar.reshape(1, SOLAR_ORIENTATION_FEATURE_SIZE),
-                        solar_hist_cur[:-1],
-                    )
-                )
-            u_hist_cur = np.concatenate(
-                (np.array([float(u)], dtype=float), u_hist_cur[:-1])
-            )
-
-        return preds, features
-
-    def _simulate_schedule(
-        self,
-        t_hist: np.ndarray,
-        out_hist: np.ndarray,
-        solar_hist: np.ndarray | None,
-        u_hist: np.ndarray,
-        t_set: float,
-        t_outs: list[float],
-        solar_forecast: list[dict[str, float | None]],
-        start: int,
-        stop: int,
-    ) -> tuple[float, list[float]]:
-        """Score a plan by simulating its temperature error and energy cost."""
-        steps = len(t_outs)
-        preds, _ = self._rollout(
-            t_hist,
-            out_hist,
-            solar_hist,
-            u_hist,
-            t_outs,
-            solar_forecast,
-            start,
-            stop,
-            steps,
-            capture_features=False,
-        )
-        try:
-            w_energy = float(self._config.get("w_energy", 0.0))
-        except (TypeError, ValueError):
-            w_energy = 0.0
-        error_decay = self._error_decay
-        if not np.isfinite(error_decay) or error_decay < 0.0 or error_decay > 1.0:
-            error_decay = 1.0
-        error_weights = None
-        if error_decay < 1.0:
-            error_weights = error_decay ** np.arange(steps, dtype=float)
-        cost = 0.0
-        for idx, t_pred in enumerate(preds):
-            u = 1 if start <= idx < stop else 0
-            err = t_pred - t_set
-            err_weight = error_weights[idx] if error_weights is not None else 1.0
-            cost += err_weight * err * err + w_energy * u
-        return cost, preds
-
-    def _find_start_stop(
-        self,
-        t_hist: np.ndarray,
-        out_hist: np.ndarray,
-        solar_hist: np.ndarray | None,
-        u_hist: np.ndarray,
-        t_set: float,
-        t_outs: list[float],
-        solar_forecast: list[dict[str, float | None]],
-    ) -> tuple[int, int, float]:
-        """Search all start/stop pairs for a single ON interval to minimize cost."""
-        # Optimization idea (not implemented): for each start, batch all stop candidates
-        # in a single vectorized rollout (S stops x T steps) to remove the inner Python
-        # loop and speed up evaluation while keeping the same O(T^3) arithmetic.
-        steps = len(t_outs)
-        best_start = steps
-        best_stop = steps
-        best_cost, _ = self._simulate_schedule(
-            t_hist,
-            out_hist,
-            solar_hist,
-            u_hist,
-            t_set,
-            t_outs,
-            solar_forecast,
-            steps,
-            steps,
-        )
-        for start in range(steps + 1):
-            for stop in range(start, steps + 1):
-                cost, _ = self._simulate_schedule(
-                    t_hist,
-                    out_hist,
-                    solar_hist,
-                    u_hist,
-                    t_set,
-                    t_outs,
-                    solar_forecast,
-                    start,
-                    stop,
-                )
-                if cost < best_cost:
-                    best_cost = cost
-                    best_start = start
-                    best_stop = stop
-        return best_start, best_stop, best_cost
-
-    def _build_forecast(
-        self, t_out: float, t_out_forecast: list[float] | None, steps: int
-    ) -> list[float]:
-        """Normalize forecast input to the lookahead length with fallbacks."""
-        temps: list[float] = []
-        if isinstance(t_out_forecast, list) and t_out_forecast:
-            for value in t_out_forecast:
-                try:
-                    temp_val = float(value)
-                except (TypeError, ValueError):
-                    continue
-                if not np.isfinite(temp_val):
-                    continue
-                temps.append(temp_val)
-
-        if not temps:
-            if self._last_forecast_temp is not None:
-                temps = [t_out] + [self._last_forecast_temp] * (steps - 1)
-            else:
-                temps = [t_out] * steps
-        elif len(temps) < steps:
-            temps.extend([temps[-1]] * (steps - len(temps)))
-        elif len(temps) > steps:
-            temps = temps[:steps]
-
-        if temps:
-            self._last_forecast_temp = temps[-1]
-        return temps
-
-    def _build_solar_forecast(
-        self,
-        solar: float | None,
-        solar_forecast: list[float] | None,
-        solar_sample: dict[str, Any] | None,
-        solar_sample_forecast: list[dict[str, Any]] | None,
-        steps: int,
-    ) -> list[dict[str, float | None]]:
-        """Normalize solar forecast input to the lookahead length with fallbacks."""
-        if not self._use_solar_feature or steps <= 0:
-            return []
-
-        values: list[dict[str, float | None]] = []
-        if isinstance(solar_sample_forecast, list) and solar_sample_forecast:
-            for value in solar_sample_forecast:
-                values.append(coerce_solar_sample(value).as_dict())
-
-        if not values and isinstance(solar_forecast, list) and solar_forecast:
-            for value in solar_forecast:
-                values.append(diffuse_only_sample(value).as_dict())
-
-        if not values:
-            current_sample = coerce_solar_sample(solar_sample, solar)
-            if current_sample.flux > 0.0:
-                values = [current_sample.as_dict()] * steps
-            elif self._last_forecast_solar is not None:
-                values = [
-                    diffuse_only_sample(self._last_forecast_solar).as_dict()
-                ] * steps
-            else:
-                values = [diffuse_only_sample(0.0).as_dict()] * steps
-        elif len(values) < steps:
-            values.extend([dict(values[-1])] * (steps - len(values)))
-        elif len(values) > steps:
-            values = values[:steps]
-
-        if values:
-            self._last_forecast_solar = float(values[-1]["flux"] or 0.0)
-        return values
-
     def _effective_solar_orientation(self) -> float:
         """Return the active orientation angle for feature construction."""
-        if self._solar_orientation_azimuth is None:
-            return 0.0
-        return self._solar_orientation_azimuth % 360.0
+        return effective_solar_orientation(self._solar_orientation_azimuth)
 
     def _record_orientation_example(self, actual_temp: float) -> None:
         """Record a matured one-step training example for orientation search."""
@@ -1747,13 +1482,19 @@ class LearningSwitchOptimizer:
         )
         self._last_dynamic_lookahead = steps
 
-        t_outs_max = self._build_forecast(t_out, t_out_forecast, max_steps)
+        t_outs_max, self._last_forecast_temp = normalize_forecast(
+            t_out,
+            t_out_forecast,
+            max_steps,
+            self._last_forecast_temp,
+        )
         t_outs = t_outs_max[:steps]
-        solar_outs_max = self._build_solar_forecast(
-            solar_current,
-            solar_forecast,
-            current_solar_sample,
-            (
+        solar_outs_max, self._last_forecast_solar = normalize_solar_forecast(
+            use_solar_feature=self._use_solar_feature,
+            solar=solar_current,
+            solar_forecast=solar_forecast,
+            solar_sample=current_solar_sample,
+            solar_sample_forecast=(
                 solar_sample_forecast
                 if solar_sample_forecast is not None
                 else [
@@ -1761,7 +1502,8 @@ class LearningSwitchOptimizer:
                     for value in solar_profile_forecast or []
                 ]
             ),
-            max_steps,
+            steps=max_steps,
+            last_forecast_solar=self._last_forecast_solar,
         )
         solar_outs = solar_outs_max[:steps]
         solar_outs_raw = [float(value.get("flux") or 0.0) for value in solar_outs]
@@ -1870,16 +1612,52 @@ class LearningSwitchOptimizer:
                 )
 
         current_solar_for_prediction = solar_outs[0] if solar_outs else solar_current
-        t_pred_off, _ = self._predict_next(
-            t_hist, out_hist, solar_hist, u_hist, 0, current_solar_for_prediction
+        t_pred_off, _ = predict_next(
+            learning_model=self._learning_model,
+            history_decay_vector=self._history_decay_vector,
+            feature_step_minutes=self._feature_step_minutes,
+            weights=self._weights,
+            solar_orientation_azimuth=self._solar_orientation_azimuth,
+            t_hist=t_hist,
+            out_hist=out_hist,
+            solar_hist=solar_hist,
+            u_hist=u_hist,
+            u_value=0,
+            solar_value=current_solar_for_prediction,
         )
-        t_pred_on, _ = self._predict_next(
-            t_hist, out_hist, solar_hist, u_hist, 1, current_solar_for_prediction
+        t_pred_on, _ = predict_next(
+            learning_model=self._learning_model,
+            history_decay_vector=self._history_decay_vector,
+            feature_step_minutes=self._feature_step_minutes,
+            weights=self._weights,
+            solar_orientation_azimuth=self._solar_orientation_azimuth,
+            t_hist=t_hist,
+            out_hist=out_hist,
+            solar_hist=solar_hist,
+            u_hist=u_hist,
+            u_value=1,
+            solar_value=current_solar_for_prediction,
         )
         t_pred_actual = t_pred_on if u_actual == 1 else t_pred_off
 
-        start_step, stop_step, plan_cost = self._find_start_stop(
-            t_hist, out_hist, solar_hist, u_hist, t_set, t_outs, solar_outs
+        planning_args = {
+            "learning_model": self._learning_model,
+            "history_decay_vector": self._history_decay_vector,
+            "feature_step_minutes": self._feature_step_minutes,
+            "weights": self._weights,
+            "solar_orientation_azimuth": self._solar_orientation_azimuth,
+            "t_hist": t_hist,
+            "out_hist": out_hist,
+            "solar_hist": solar_hist,
+            "u_hist": u_hist,
+        }
+        start_step, stop_step, plan_cost = find_start_stop(
+            **planning_args,
+            error_decay=self._error_decay,
+            w_energy=self._config.get("w_energy", 0.0),
+            t_set=t_set,
+            t_outs=t_outs,
+            solar_forecast=solar_outs,
         )
         u_planned = 1 if start_step == 0 and stop_step > 0 else 0
         planned_states = [
@@ -1887,30 +1665,24 @@ class LearningSwitchOptimizer:
         ]
 
         rollout_steps = max(1, len(t_outs))
-        preds_next, feats_next = self._rollout(
-            t_hist,
-            out_hist,
-            solar_hist,
-            u_hist,
-            t_outs,
-            solar_outs,
-            start_step,
-            stop_step,
-            rollout_steps,
+        preds_next, feats_next = rollout(
+            **planning_args,
+            t_outs=t_outs,
+            solar_forecast=solar_outs,
+            start=start_step,
+            stop=stop_step,
+            steps=rollout_steps,
             capture_features=True,
         )
         preds_for_error = preds_next
         if max_steps != rollout_steps:
-            preds_for_error, _ = self._rollout(
-                t_hist,
-                out_hist,
-                solar_hist,
-                u_hist,
-                t_outs_max,
-                solar_outs_max,
-                start_step,
-                stop_step,
-                max_steps,
+            preds_for_error, _ = rollout(
+                **planning_args,
+                t_outs=t_outs_max,
+                solar_forecast=solar_outs_max,
+                start=start_step,
+                stop=stop_step,
+                steps=max_steps,
                 capture_features=False,
             )
         if u_planned == 1:
