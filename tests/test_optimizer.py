@@ -156,6 +156,130 @@ def test_deterministic_linear_tick_sequence_is_preserved() -> None:
     assert snapshot["last_plan"] == {"start_step": 0, "stop_step": 12}
 
 
+def test_k_step_tracking_records_matured_errors_and_drops_stale_predictions() -> None:
+    """K-step tracking should mature only current predictions and prune stale rows."""
+    optimizer = LearningSwitchOptimizer(
+        "zone_tracking",
+        config={"history_steps": 4, "lookahead_steps": 12},
+    )
+    optimizer._pending_k_step_preds[0] = {1: 99.0}
+    optimizer._pending_k_step_features[0] = {1: [99.0]}
+    optimizer._pending_k_step_baseline[0] = {1: 99.0}
+
+    optimizer._queue_k_step_predictions(
+        [20.1, 20.4, float("nan")],
+        step_index=1,
+        max_steps=3,
+    )
+    optimizer._queue_k_step_features(
+        [
+            np.array([1.0, 2.0]),
+            np.array([3.0, 4.0]),
+            np.array([5.0, 6.0]),
+        ],
+        step_index=1,
+        max_steps=3,
+    )
+    optimizer._queue_k_step_baseline(20.0, step_index=1, max_steps=3)
+
+    errors, updates = optimizer._record_k_step_errors(20.7, step_index=3)
+
+    assert 0 not in optimizer._pending_k_step_preds
+    assert 0 not in optimizer._pending_k_step_features
+    assert 0 not in optimizer._pending_k_step_baseline
+    assert errors == {2: pytest.approx(0.3)}
+    assert updates == [
+        {"horizon": 2, "error": pytest.approx(0.3), "feature": [3.0, 4.0]}
+    ]
+    assert optimizer._k_step_abs_error_history == {
+        2: {"mean": pytest.approx(0.3), "count": 1}
+    }
+    assert optimizer._k_step_pred_improvement_history == {
+        2: {"mean": pytest.approx(0.4), "count": 1}
+    }
+
+
+def test_dynamic_lookahead_selection_contract() -> None:
+    """Dynamic lookahead should report the same bounds and reason contract."""
+    optimizer = LearningSwitchOptimizer("zone_lookahead")
+
+    assert optimizer._select_dynamic_lookahead(
+        {1: {"mean": 0.1, "count": 1}},
+        min_steps=2,
+        max_steps=4,
+    ) == (2, "insufficient_data")
+
+    assert optimizer._select_dynamic_lookahead(
+        {
+            1: {"mean": 0.1, "count": 1},
+            2: {"mean": 0.1, "count": 1},
+            3: {"mean": 0.25, "count": 1},
+            4: {"mean": 0.1, "count": 1},
+        },
+        min_steps=2,
+        max_steps=4,
+    ) == (2, "within_tolerance")
+
+    assert optimizer._select_dynamic_lookahead(
+        {
+            1: {"mean": 0.1, "count": 1},
+            2: {"mean": 0.1, "count": 1},
+            3: {"mean": 0.15, "count": 1},
+            4: {"mean": 0.2, "count": 1},
+        },
+        min_steps=2,
+        max_steps=4,
+    ) == (4, "within_tolerance")
+
+
+def test_learning_update_payloads_preserve_shape_and_weight_effects() -> None:
+    """Single and multi-step learning updates should keep payload compatibility."""
+    optimizer = LearningSwitchOptimizer(
+        "zone_learning",
+        config={"history_steps": 1, "l2_reg": 0.0},
+    )
+    optimizer._weights = np.zeros(4, dtype=float)
+
+    update = optimizer._compute_update(
+        actual_temp=21.0,
+        prev_pred=20.0,
+        prev_feature=[1.0, 0.0, 0.0, 1.0],
+        base_eta=0.1,
+        eta=0.1,
+    )
+
+    assert update is not None
+    assert update["error"] == pytest.approx(1.0)
+    assert update["errors"] == [{"step": 0, "error": 1.0, "weight": 1.0}]
+    assert update["eta_scale"] == pytest.approx(1.0)
+    assert update["steps_used"] == 1
+    assert update["delta"] == pytest.approx([0.1999996, 0.0, 0.0, 0.1999996])
+    assert optimizer._weights.tolist() == pytest.approx(update["delta"])
+
+    optimizer._weights = np.zeros(4, dtype=float)
+    multi_update = optimizer._compute_update_multi(
+        [
+            {"horizon": 1, "error": 1.0, "feature": [1.0, 0.0, 0.0, 1.0]},
+            {"horizon": 2, "error": -0.5, "feature": [0.0, 1.0, 0.0, 1.0]},
+        ],
+        base_eta=0.2,
+        eta=0.1,
+    )
+
+    assert multi_update is not None
+    assert multi_update["error"] == pytest.approx(0.25)
+    assert multi_update["errors"] == [
+        {"step": 1, "error": 1.0, "weight": 1.0},
+        {"step": 2, "error": -0.5, "weight": 1.0},
+    ]
+    assert multi_update["eta_scale"] == pytest.approx(0.5)
+    assert multi_update["steps_used"] == 2
+    assert multi_update["delta"] == pytest.approx(
+        [0.0999998, -0.0499999, 0.0, 0.0499999]
+    )
+    assert optimizer._weights.tolist() == pytest.approx(multi_update["delta"])
+
+
 def test_snapshot_restore_round_trip() -> None:
     """The optimizer should restore a captured state snapshot."""
     optimizer = LearningSwitchOptimizer(
