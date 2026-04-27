@@ -26,18 +26,32 @@ import numpy as np
 
 from .const import (
     DEFAULT_LEARNING_MODEL,
-    LEARNING_MODEL_LABELS,
     LEARNING_MODEL_LINEAR,
     LEARNING_MODEL_PHYSICAL,
 )
+from .optimizer_state import (
+    MODEL_SCHEMA_VERSION,
+    adapt_weights,
+    build_optimizer_snapshot,
+    coerce_float,
+    coerce_float_list,
+    coerce_int,
+    coerce_int_list,
+    coerce_optional_float,
+    legacy_model_type,
+    normalize_learning_model,
+    optimizer_model_id,
+    optimizer_model_name,
+    restore_k_step_stats,
+    restore_orientation_state,
+    restore_solar_sample_history,
+    snapshot_model_id,
+)
 from .solar import (
     SOLAR_ORIENTATION_FEATURE_SIZE,
-    SOLAR_PROFILE_BIN_AZIMUTHS,
-    SOLAR_PROFILE_SIZE,
     build_solar_orientation_features,
     compass_label,
     coerce_solar_sample,
-    coerce_solar_profile,
     diffuse_only_sample,
 )
 
@@ -56,7 +70,6 @@ SOLAR_ORIENTATION_MIN_ACTIVE_EXAMPLES = 4
 SOLAR_ORIENTATION_TRAINING_MAX = 96
 SOLAR_ACTIVE_FLUX_MIN = 10.0
 SOLAR_ORIENTATION_IMPROVEMENT_MIN = 0.02
-MODEL_SCHEMA_VERSION = 2
 PHYSICAL_HALF_LIFE_MINUTES = (60.0, 180.0, 360.0)
 PHYSICAL_SOLAR_SCALE = 500.0
 
@@ -89,7 +102,7 @@ class LearningSwitchOptimizer:
             self._config.update({k: v for k, v in config.items() if v is not None})
 
         # Length of history window.
-        self._history_steps = self._coerce_int(
+        self._history_steps = coerce_int(
             self._config.get("history_steps"),
             DEFAULT_LEARNING_SWITCH_CONFIG["history_steps"],
         )
@@ -97,24 +110,24 @@ class LearningSwitchOptimizer:
         self._history_decay = 1.0
         self._history_decay_vector = np.ones(self._history_steps, dtype=float)
         # Decay applied to future prediction errors in planning (0 <= decay <= 1).
-        self._error_decay = self._coerce_float(
+        self._error_decay = coerce_float(
             self._config.get("error_decay"),
             DEFAULT_LEARNING_SWITCH_CONFIG["error_decay"],
         )
         if not (0.0 <= self._error_decay <= 1.0):
             self._error_decay = DEFAULT_LEARNING_SWITCH_CONFIG["error_decay"]
         # L2 regularization coefficient for weight decay (>= 0).
-        self._l2_reg = self._coerce_float(
+        self._l2_reg = coerce_float(
             self._config.get("l2_reg"), DEFAULT_LEARNING_SWITCH_CONFIG["l2_reg"]
         )
         if not np.isfinite(self._l2_reg) or self._l2_reg < 0.0:
             self._l2_reg = DEFAULT_LEARNING_SWITCH_CONFIG["l2_reg"]
         # Default heating effect when weights are fresh.
-        self._default_u_gain_per_hour = self._coerce_float(
+        self._default_u_gain_per_hour = coerce_float(
             self._config.get("default_u_gain_per_hour"),
             DEFAULT_LEARNING_SWITCH_CONFIG["default_u_gain_per_hour"],
         )
-        self._learning_model = self._normalize_learning_model(
+        self._learning_model = normalize_learning_model(
             self._config.get("learning_model")
         )
         self._model_schema_version = MODEL_SCHEMA_VERSION
@@ -187,117 +200,43 @@ class LearningSwitchOptimizer:
         self._last_plan: dict[str, int | None] = {"start_step": None, "stop_step": None}
         self._warned_invalid_weights = False
 
-    def _model_name(self) -> str:
-        """Return the user-facing learning model label."""
-        return LEARNING_MODEL_LABELS[self._learning_model]
-
-    def _model_id(self) -> str:
-        """Return the compact internal model identifier."""
-        if self._learning_model == LEARNING_MODEL_PHYSICAL:
-            return (
-                "physical_solar_orientation" if self._use_solar_feature else "physical"
-            )
-        return "linear_solar_orientation" if self._use_solar_feature else "linear"
-
-    def _normalize_learning_model(self, value: Any) -> str:
-        """Normalize the configured learning model identifier."""
-        model = str(value or DEFAULT_LEARNING_MODEL)
-        if model not in LEARNING_MODEL_LABELS:
-            return LEARNING_MODEL_LINEAR
-        return model
-
-    def _snapshot_model_id(self, state: dict) -> str | None:
-        """Return the internal model id represented by a snapshot."""
-        model_id = state.get("model_id")
-        if isinstance(model_id, str) and model_id:
-            return model_id
-        model = state.get("model")
-        if model == "Physical":
-            return (
-                "physical_solar_orientation" if self._use_solar_feature else "physical"
-            )
-        if model == "Linear":
-            return "linear_solar_orientation" if self._use_solar_feature else "linear"
-        if model == "delta_zscore":
-            return "linear"
-        if model in {
-            "delta_zscore_solar",
-            "delta_zscore_solar_profile",
-            "delta_zscore_solar_orientation",
-        }:
-            return "linear_solar_orientation"
-        return None
-
-    def _legacy_model_type(self, state: dict) -> str | None:
-        """Return a legacy linear model id when one is present."""
-        model = state.get("model")
-        return (
-            model
-            if model
-            in {
-                "delta_zscore",
-                "delta_zscore_solar",
-                "delta_zscore_solar_profile",
-                "delta_zscore_solar_orientation",
-            }
-            else None
-        )
-
     def snapshot_state(self) -> dict:
         """Serialize weights and history for persistence/debugging."""
-        return {
-            "weights": self._weights.tolist(),
-            "model": self._model_name(),
-            "model_id": self._model_id(),
-            "model_schema_version": self._model_schema_version,
-            "history": {
-                "t_room": list(self._t_hist),
-                "t_out": list(self._out_hist),
-                "solar": list(self._solar_hist),
-                "solar_samples": [dict(row) for row in self._solar_sample_hist],
-                "u": list(self._u_hist),
-                "pred_next": list(self._prev_pred_history),
-                "pred_abs_error": list(self._prev_abs_error_history),
-                "pred_timestamps": list(self._prev_pred_timestamp_history),
-                "weight_abs_update": list(self._weight_abs_update_history),
-                "weight_delta_abs_latest": list(self._weight_delta_abs_latest),
-                "k_step_abs_error": {
-                    str(k): {
-                        "mean": values.get("mean"),
-                        "count": int(values.get("count", 0)),
-                    }
-                    for k, values in self._k_step_abs_error_history.items()
-                },
-                "k_step_pred_improvement": {
-                    str(k): {
-                        "mean": values.get("mean"),
-                        "count": int(values.get("count", 0)),
-                    }
-                    for k, values in self._k_step_pred_improvement_history.items()
-                },
-            },
-            "last_u": self._last_u,
-            "last_plan": dict(self._last_plan),
-            "solar_orientation_azimuth": self._solar_orientation_azimuth,
-            "solar_orientation_confidence": self._solar_orientation_confidence,
-            "solar_orientation_score": self._solar_orientation_score,
-            "eta": self._last_eta,
-            "base_eta": self._base_eta,
-            "prev_feature": list(self._prev_feature) if self._prev_feature else None,
-            "config": {
-                "lookahead_steps": self._config.get("lookahead_steps"),
-                "learning_rate": self._config.get("learning_rate"),
-                "l2_reg": self._l2_reg,
-                "w_energy": self._config.get("w_energy"),
-                "history_steps": self._history_steps,
-                "history_decay": self._history_decay,
-                "error_decay": self._error_decay,
-                "default_u_gain_per_hour": self._default_u_gain_per_hour,
-                "use_solar_feature": self._use_solar_feature,
-                "learning_model": self._learning_model,
-            },
-            "solar_orientation": self.solar_orientation_diagnostics(),
-        }
+        return build_optimizer_snapshot(
+            weights=self._weights,
+            model_name=optimizer_model_name(self._learning_model),
+            model_id=optimizer_model_id(self._learning_model, self._use_solar_feature),
+            model_schema_version=self._model_schema_version,
+            t_hist=self._t_hist,
+            out_hist=self._out_hist,
+            solar_hist=self._solar_hist,
+            solar_sample_hist=self._solar_sample_hist,
+            u_hist=self._u_hist,
+            prev_pred_history=self._prev_pred_history,
+            prev_abs_error_history=self._prev_abs_error_history,
+            prev_pred_timestamp_history=self._prev_pred_timestamp_history,
+            weight_abs_update_history=self._weight_abs_update_history,
+            weight_delta_abs_latest=self._weight_delta_abs_latest,
+            k_step_abs_error_history=self._k_step_abs_error_history,
+            k_step_pred_improvement_history=self._k_step_pred_improvement_history,
+            last_u=self._last_u,
+            last_plan=self._last_plan,
+            solar_orientation_azimuth=self._solar_orientation_azimuth,
+            solar_orientation_confidence=self._solar_orientation_confidence,
+            solar_orientation_score=self._solar_orientation_score,
+            eta=self._last_eta,
+            base_eta=self._base_eta,
+            prev_feature=self._prev_feature,
+            config=self._config,
+            l2_reg=self._l2_reg,
+            history_steps=self._history_steps,
+            history_decay=self._history_decay,
+            error_decay=self._error_decay,
+            default_u_gain_per_hour=self._default_u_gain_per_hour,
+            use_solar_feature=self._use_solar_feature,
+            learning_model=self._learning_model,
+            solar_orientation=self.solar_orientation_diagnostics(),
+        )
 
     def restore_state(self, state: dict | None) -> None:
         """Restore the internal state defensively from a snapshot."""
@@ -305,9 +244,11 @@ class LearningSwitchOptimizer:
             if not isinstance(state, dict):
                 return
 
-            model_type = self._legacy_model_type(state)
-            snapshot_model_id = self._snapshot_model_id(state)
-            model_matches = snapshot_model_id == self._model_id()
+            model_type = legacy_model_type(state)
+            restored_model_id = snapshot_model_id(state, self._use_solar_feature)
+            model_matches = restored_model_id == optimizer_model_id(
+                self._learning_model, self._use_solar_feature
+            )
             weights = state.get("weights")
             if model_matches and weights is not None:
                 restored = np.array([float(v) for v in weights], dtype=float)
@@ -316,70 +257,78 @@ class LearningSwitchOptimizer:
                         restored = self._init_weights(self._weights_init)
                     self._weights = restored
                 elif self._learning_model == LEARNING_MODEL_LINEAR:
-                    adapted = self._adapt_weights(restored, model_type)
+                    adapted = adapt_weights(
+                        restored,
+                        model_type,
+                        history_steps=self._history_steps,
+                        solar_profile_size=self._solar_profile_size(),
+                        feature_size=self._feature_size(),
+                    )
                     if adapted is not None:
-                        self._weights = adapted
+                        self._weights = adapted.weights
+                        if adapted.solar_orientation_azimuth is not None:
+                            self._solar_orientation_azimuth = (
+                                adapted.solar_orientation_azimuth
+                            )
             elif (
                 weights is not None
                 and self._learning_model == LEARNING_MODEL_LINEAR
                 and model_type is not None
             ):
                 restored = np.array([float(v) for v in weights], dtype=float)
-                adapted = self._adapt_weights(restored, model_type)
+                adapted = adapt_weights(
+                    restored,
+                    model_type,
+                    history_steps=self._history_steps,
+                    solar_profile_size=self._solar_profile_size(),
+                    feature_size=self._feature_size(),
+                )
                 if adapted is not None:
-                    self._weights = adapted
+                    self._weights = adapted.weights
+                    if adapted.solar_orientation_azimuth is not None:
+                        self._solar_orientation_azimuth = (
+                            adapted.solar_orientation_azimuth
+                        )
             elif weights is not None:
                 self._weights = self._init_weights(self._weights_init)
 
             history = state.get("history") or {}
-            self._t_hist = self._coerce_float_list(history.get("t_room"))[
+            self._t_hist = coerce_float_list(history.get("t_room"))[
                 : self._history_steps
             ]
-            self._out_hist = self._coerce_float_list(history.get("t_out"))[
+            self._out_hist = coerce_float_list(history.get("t_out"))[
                 : self._history_steps
             ]
-            self._solar_hist = self._coerce_float_list(history.get("solar"))[
+            self._solar_hist = coerce_float_list(history.get("solar"))[
                 : self._history_steps
             ]
-            self._solar_sample_hist = self._coerce_solar_sample_history(
-                history.get("solar_samples")
-            )[: self._history_steps]
-            if self._use_solar_feature and not self._solar_sample_hist:
-                legacy_profiles = self._coerce_solar_profile_history(
-                    history.get("solar_profile")
-                )
-                if legacy_profiles:
-                    self._solar_sample_hist = [
-                        coerce_solar_sample(row).as_dict() for row in legacy_profiles
-                    ][: self._history_steps]
-                else:
-                    self._solar_sample_hist = [
-                        diffuse_only_sample(value).as_dict()
-                        for value in self._solar_hist
-                    ][: self._history_steps]
-            self._u_hist = self._coerce_int_list(history.get("u"))[
+            self._solar_sample_hist = restore_solar_sample_history(
+                history,
+                self._solar_hist,
+                use_solar_feature=self._use_solar_feature,
+                history_steps=self._history_steps,
+            )
+            self._u_hist = coerce_int_list(history.get("u"))[: self._history_steps]
+            self._prev_pred_history = coerce_float_list(history.get("pred_next"))[
                 : self._history_steps
             ]
-            self._prev_pred_history = self._coerce_float_list(history.get("pred_next"))[
-                : self._history_steps
-            ]
-            self._prev_abs_error_history = self._coerce_float_list(
+            self._prev_abs_error_history = coerce_float_list(
                 history.get("pred_abs_error")
             )[: self._history_steps]
             pred_timestamps = history.get("pred_timestamps") or []
             self._prev_pred_timestamp_history = [
                 str(value) for value in pred_timestamps
             ][: self._history_steps]
-            self._weight_abs_update_history = self._coerce_float_list(
+            self._weight_abs_update_history = coerce_float_list(
                 history.get("weight_abs_update")
             )[: self._history_steps]
-            self._weight_delta_abs_latest = self._coerce_float_list(
+            self._weight_delta_abs_latest = coerce_float_list(
                 history.get("weight_delta_abs_latest")
             )[: self._weights.size]
-            self._k_step_abs_error_history = self._restore_k_step_stats(
+            self._k_step_abs_error_history = restore_k_step_stats(
                 history.get("k_step_abs_error")
             )
-            self._k_step_pred_improvement_history = self._restore_k_step_stats(
+            self._k_step_pred_improvement_history = restore_k_step_stats(
                 history.get("k_step_pred_improvement")
             )
 
@@ -396,7 +345,11 @@ class LearningSwitchOptimizer:
                 "start_step": last_plan.get("start_step"),
                 "stop_step": last_plan.get("stop_step"),
             }
-            self._restore_orientation_state(state)
+            orientation = restore_orientation_state(state)
+            if orientation.azimuth is not None:
+                self._solar_orientation_azimuth = orientation.azimuth
+            self._solar_orientation_confidence = orientation.confidence
+            self._solar_orientation_score = orientation.score
             eta = state.get("eta")
             if eta is not None:
                 self._last_eta = float(eta)
@@ -415,104 +368,6 @@ class LearningSwitchOptimizer:
                 self._clear_pending_predictions()
         except Exception as exc:  # noqa: BLE001 - keep restore resilient
             _LOGGER.warning("%s - Learning state restore failed: %s", self._name, exc)
-
-    def _adapt_weights(
-        self, restored: np.ndarray, model_type: str | None
-    ) -> np.ndarray | None:
-        """Adapt weights saved with a different history length."""
-        size = restored.size
-        if size < 4:
-            return None
-        old_layout = self._infer_weight_layout(model_type, size)
-        if old_layout is None:
-            return None
-        old_steps, old_profile_size = old_layout
-        if old_steps <= 0:
-            return None
-        new_steps = self._history_steps
-        new_profile_size = self._solar_profile_size()
-        new_weights = np.zeros(self._feature_size() + 1, dtype=float)
-        copy_len = min(old_steps, new_steps)
-
-        new_weights[0:copy_len] = restored[0:copy_len]
-        old_out_start = old_steps
-        new_out_start = new_steps
-        new_weights[new_out_start : new_out_start + copy_len] = restored[
-            old_out_start : old_out_start + copy_len
-        ]
-
-        old_solar_start = old_steps * 2
-        new_solar_start = new_steps * 2
-        old_u_start = old_solar_start + old_steps * old_profile_size
-        new_u_start = new_solar_start + new_steps * new_profile_size
-        if old_profile_size and new_profile_size:
-            if old_profile_size == SOLAR_PROFILE_SIZE:
-                orientation = self._infer_legacy_orientation_from_weights(
-                    restored, old_steps, old_solar_start
-                )
-                if orientation is not None:
-                    self._solar_orientation_azimuth = orientation
-                for step in range(copy_len):
-                    old_start = old_solar_start + step * old_profile_size
-                    new_start = new_solar_start + step * new_profile_size
-                    old_row = restored[old_start : old_start + old_profile_size]
-                    new_weights[new_start] = old_row[0]
-                    if orientation is not None:
-                        first_index = self._legacy_bin_index(orientation)
-                        second_index = self._legacy_bin_index(orientation + 90.0)
-                        new_weights[new_start + 1] = old_row[first_index + 1]
-                        new_weights[new_start + 2] = old_row[second_index + 1]
-            else:
-                profile_copy = min(old_profile_size, new_profile_size)
-                for step in range(copy_len):
-                    old_start = old_solar_start + step * old_profile_size
-                    new_start = new_solar_start + step * new_profile_size
-                    new_weights[new_start : new_start + profile_copy] = restored[
-                        old_start : old_start + profile_copy
-                    ]
-        new_weights[new_u_start : new_u_start + copy_len] = restored[
-            old_u_start : old_u_start + copy_len
-        ]
-        bias = restored[-1]
-        if np.isfinite(bias):
-            new_weights[-1] = float(bias)
-        if np.allclose(new_weights, 0.0) or not np.all(np.isfinite(new_weights)):
-            return None
-        return new_weights
-
-    def _infer_weight_layout(
-        self, model_type: str | None, size: int
-    ) -> tuple[int, int] | None:
-        """Infer (history steps, solar profile size) from saved model metadata."""
-        if model_type == "delta_zscore":
-            return ((size - 1) // 3, 0) if (size - 1) % 3 == 0 else None
-        if model_type == "delta_zscore_solar":
-            return ((size - 1) // 4, 1) if (size - 1) % 4 == 0 else None
-        if model_type == "delta_zscore_solar_profile":
-            group_count = 3 + SOLAR_PROFILE_SIZE
-            return (
-                ((size - 1) // group_count, SOLAR_PROFILE_SIZE)
-                if (size - 1) % group_count == 0
-                else None
-            )
-        if model_type == "delta_zscore_solar_orientation":
-            group_count = 3 + SOLAR_ORIENTATION_FEATURE_SIZE
-            return (
-                ((size - 1) // group_count, SOLAR_ORIENTATION_FEATURE_SIZE)
-                if (size - 1) % group_count == 0
-                else None
-            )
-        group_count = 3 + SOLAR_ORIENTATION_FEATURE_SIZE
-        if (size - 1) % group_count == 0:
-            return ((size - 1) // group_count, SOLAR_ORIENTATION_FEATURE_SIZE)
-        group_count = 3 + SOLAR_PROFILE_SIZE
-        if (size - 1) % group_count == 0:
-            return ((size - 1) // group_count, SOLAR_PROFILE_SIZE)
-        if (size - 1) % 3 == 0:
-            return ((size - 1) // 3, 0)
-        if (size - 1) % 4 == 0:
-            return ((size - 1) // 4, 1)
-        return None
 
     def _solar_profile_size(self) -> int:
         """Return the number of solar features per history step."""
@@ -610,152 +465,6 @@ class LearningSwitchOptimizer:
             if self._learning_model == LEARNING_MODEL_PHYSICAL
             else self._history_steps
         )
-
-    def _coerce_int(self, value, default: int) -> int:
-        try:
-            value = int(value)
-        except (TypeError, ValueError):
-            value = default
-        if value <= 0:
-            value = default
-        return value
-
-    def _coerce_float(self, value, default: float) -> float:
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return default
-
-    def _coerce_float_list(self, values) -> list[float]:
-        if not isinstance(values, (list, tuple)):
-            return []
-        out: list[float] = []
-        for value in values:
-            try:
-                out.append(float(value))
-            except (TypeError, ValueError):
-                continue
-        return out
-
-    def _coerce_solar_profile_history(self, values) -> list[list[float]]:
-        """Coerce persisted solar profile history rows."""
-        if not isinstance(values, (list, tuple)):
-            return []
-        out: list[list[float]] = []
-        for value in values:
-            if not isinstance(value, (list, tuple)):
-                continue
-            profile = coerce_solar_profile(value)
-            out.append(list(profile))
-        return out
-
-    def _coerce_solar_sample_history(self, values) -> list[dict[str, float | None]]:
-        """Coerce persisted solar sample history rows."""
-        if not isinstance(values, (list, tuple)):
-            return []
-        out: list[dict[str, float | None]] = []
-        for value in values:
-            out.append(coerce_solar_sample(value).as_dict())
-        return out
-
-    def _restore_orientation_state(self, state: dict) -> None:
-        """Restore persisted orientation metadata defensively."""
-        azimuth = self._coerce_optional_float(state.get("solar_orientation_azimuth"))
-        if azimuth is None:
-            diagnostics = state.get("solar_orientation")
-            if isinstance(diagnostics, dict):
-                azimuth = self._coerce_optional_float(diagnostics.get("azimuth"))
-        self._solar_orientation_azimuth = (
-            azimuth % 360.0 if azimuth is not None else self._solar_orientation_azimuth
-        )
-        confidence = self._coerce_optional_float(
-            state.get("solar_orientation_confidence")
-        )
-        if confidence is None:
-            diagnostics = state.get("solar_orientation")
-            if isinstance(diagnostics, dict):
-                confidence = self._coerce_optional_float(diagnostics.get("confidence"))
-        self._solar_orientation_confidence = confidence
-        self._solar_orientation_score = self._coerce_optional_float(
-            state.get("solar_orientation_score")
-        )
-
-    def _coerce_optional_float(self, value) -> float | None:
-        """Coerce a finite optional float."""
-        try:
-            if value is None:
-                return None
-            result = float(value)
-        except (TypeError, ValueError):
-            return None
-        if not np.isfinite(result):
-            return None
-        return result
-
-    def _infer_legacy_orientation_from_weights(
-        self, weights: np.ndarray, old_steps: int, old_solar_start: int
-    ) -> float | None:
-        """Infer a two-facade orientation from old compass-bin solar weights."""
-        if weights.size < old_solar_start + SOLAR_PROFILE_SIZE:
-            return None
-        exposure_bins = np.zeros(len(SOLAR_PROFILE_BIN_AZIMUTHS), dtype=float)
-        for step in range(old_steps):
-            row_start = old_solar_start + step * SOLAR_PROFILE_SIZE
-            row = weights[row_start : row_start + SOLAR_PROFILE_SIZE]
-            if row.size < SOLAR_PROFILE_SIZE:
-                continue
-            for index in range(len(SOLAR_PROFILE_BIN_AZIMUTHS)):
-                weight = float(row[index + 1])
-                if np.isfinite(weight) and weight > 0.0:
-                    exposure_bins[index] += weight
-        if not np.any(exposure_bins > 0.0):
-            return None
-        best_score = -1.0
-        best_azimuth = None
-        for azimuth in SOLAR_PROFILE_BIN_AZIMUTHS:
-            first = self._legacy_bin_index(azimuth)
-            second = self._legacy_bin_index(azimuth + 90.0)
-            score = exposure_bins[first] + exposure_bins[second]
-            if score > best_score:
-                best_score = float(score)
-                best_azimuth = float(azimuth)
-        return best_azimuth
-
-    def _legacy_bin_index(self, azimuth: float) -> int:
-        """Return the nearest legacy eight-way bin index for an azimuth."""
-        return int(round((azimuth % 360.0) / 45.0)) % len(SOLAR_PROFILE_BIN_AZIMUTHS)
-
-    def _coerce_int_list(self, values) -> list[int]:
-        if not isinstance(values, (list, tuple)):
-            return []
-        out: list[int] = []
-        for value in values:
-            try:
-                out.append(int(value))
-            except (TypeError, ValueError):
-                continue
-        return out
-
-    def _restore_k_step_stats(
-        self, payload
-    ) -> dict[int, dict[str, float | int | None]]:
-        """Restore k-step stats, supporting legacy list values."""
-        if payload is None:
-            return {}
-        restored: dict[int, dict[str, float | int | None]] = {}
-        for key, values in payload.items():
-            horizon = int(key)
-            if isinstance(values, dict):
-                mean = values.get("mean")
-                count = values.get("count", 0)
-                mean_val = float(mean) if mean is not None else None
-                count_val = int(count)
-            else:
-                items = self._coerce_float_list(values)
-                mean_val = float(np.mean(items)) if items else None
-                count_val = len(items)
-            restored[horizon] = {"mean": mean_val, "count": count_val}
-        return restored
 
     def _clear_pending_predictions(self) -> None:
         """Drop pending learning rows whose feature semantics may be stale."""
@@ -1633,7 +1342,7 @@ class LearningSwitchOptimizer:
         if not self._use_solar_feature or self._prev_orientation_input is None:
             return
         previous = self._prev_orientation_input
-        base_temp = self._coerce_optional_float(previous.get("base_temp"))
+        base_temp = coerce_optional_float(previous.get("base_temp"))
         if base_temp is None:
             self._prev_orientation_input = None
             return
@@ -1760,7 +1469,7 @@ class LearningSwitchOptimizer:
         targets: list[float] = []
         for example in examples:
             feature = self._feature_from_orientation_example(example, orientation)
-            target = self._coerce_optional_float(example.get("target_delta"))
+            target = coerce_optional_float(example.get("target_delta"))
             if feature is None or target is None:
                 continue
             rows.append(feature)
@@ -1865,7 +1574,7 @@ class LearningSwitchOptimizer:
             samples = example.get("solar_samples")
             if not isinstance(samples, list) or not samples:
                 continue
-            target = self._coerce_optional_float(example.get("target_delta"))
+            target = coerce_optional_float(example.get("target_delta"))
             if target is None or target <= 0.0:
                 continue
             features = build_solar_orientation_features(
@@ -2166,7 +1875,7 @@ class LearningSwitchOptimizer:
         )
         t_hist, out_hist, solar_hist, u_hist = self._history_arrays()
 
-        configured_steps = self._coerce_int(
+        configured_steps = coerce_int(
             self._config.get("lookahead_steps"),
             DEFAULT_LEARNING_SWITCH_CONFIG["lookahead_steps"],
         )
@@ -2241,7 +1950,7 @@ class LearningSwitchOptimizer:
                         self._prev_pred_timestamp_history[: self._history_steps]
                     )
 
-        base_eta = self._coerce_float(
+        base_eta = coerce_float(
             self._config.get("learning_rate"),
             DEFAULT_LEARNING_SWITCH_CONFIG["learning_rate"],
         )
