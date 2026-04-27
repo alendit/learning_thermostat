@@ -4,11 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
-
-from homeassistant.components.climate.const import HVACMode
-from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_LEARNING_MODEL,
@@ -17,7 +14,7 @@ from .const import (
     LEARNING_MODEL_LINEAR,
 )
 from .optimizer import DEFAULT_LEARNING_SWITCH_CONFIG, LearningSwitchOptimizer
-from .storage import LearningEntryPayload, build_entry_payload
+from .state import LearningEntryPayload, ThermostatMode, build_entry_payload
 
 
 class Optimizer(Protocol):
@@ -49,6 +46,11 @@ class Optimizer(Protocol):
 OptimizerFactory = Callable[[str, dict[str, Any]], Optimizer]
 SwitchWriter = Callable[[bool], Awaitable[None]]
 StatePersister = Callable[[LearningEntryPayload], Awaitable[None]]
+
+
+def _utcnow() -> datetime:
+    """Return the current UTC time without Home Assistant helpers."""
+    return datetime.now(UTC)
 
 
 def _default_optimizer_factory(name: str, config: dict[str, Any]) -> Optimizer:
@@ -125,7 +127,7 @@ class ThermostatController:
         config: ThermostatConfig,
         *,
         optimizer_factory: OptimizerFactory = _default_optimizer_factory,
-        now: Callable[[], Any] = dt_util.utcnow,
+        now: Callable[[], datetime] = _utcnow,
     ) -> None:
         self.config = config
         self._optimizer_factory = optimizer_factory
@@ -139,7 +141,7 @@ class ThermostatController:
         self._outside_temperature: float | None = None
         self._current_solar: float | None = None
         self._current_solar_sample: dict[str, Any] | None = None
-        self._hvac_mode = HVACMode.HEAT
+        self._hvac_mode = ThermostatMode.HEAT
         self._target_temperature = config.target_temperature
 
     @property
@@ -153,8 +155,8 @@ class ThermostatController:
         return self._target_temperature
 
     @property
-    def hvac_mode(self) -> HVACMode:
-        """Return the current HVAC mode."""
+    def hvac_mode(self) -> ThermostatMode:
+        """Return the current thermostat mode."""
         return self._hvac_mode
 
     @property
@@ -208,7 +210,7 @@ class ThermostatController:
     def restore(
         self,
         *,
-        hvac_mode: HVACMode,
+        hvac_mode: ThermostatMode,
         target_temperature: float | None,
         stored_payload: LearningEntryPayload | None,
     ) -> None:
@@ -224,7 +226,7 @@ class ThermostatController:
             self._learning_state = learning_state
         learning_last_tick = stored_payload.get("learning_last_tick")
         if isinstance(learning_last_tick, str):
-            self._learning_last_tick = dt_util.parse_datetime(learning_last_tick)
+            self._learning_last_tick = _parse_datetime(learning_last_tick)
         self._current_temperature = _coerce_float(
             stored_payload.get("current_temperature")
         )
@@ -232,8 +234,8 @@ class ThermostatController:
             stored_payload.get("outside_temperature")
         )
 
-    def set_hvac_mode(self, hvac_mode: HVACMode) -> None:
-        """Set the active HVAC mode."""
+    def set_hvac_mode(self, hvac_mode: ThermostatMode) -> None:
+        """Set the active thermostat mode."""
         self._hvac_mode = hvac_mode
 
     def set_target_temperature(self, temperature: float) -> None:
@@ -311,7 +313,7 @@ class ThermostatController:
         persist: StatePersister,
     ) -> bool:
         """Run one thermostat control cycle."""
-        if self._hvac_mode == HVACMode.OFF:
+        if self._hvac_mode == ThermostatMode.OFF:
             self._learning_on_percent = 0.0
             await turn_switches(False)
             await persist(self.build_persisted_payload())
@@ -390,4 +392,12 @@ def _coerce_float(value: Any) -> float | None:
             return None
         return float(value)
     except (TypeError, ValueError):
+        return None
+
+
+def _parse_datetime(value: str) -> datetime | None:
+    """Parse persisted ISO datetimes without depending on Home Assistant."""
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
         return None

@@ -5,13 +5,13 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
-from homeassistant.components.climate.const import HVACMode
 
 from custom_components.learning_thermostat.controller import (
     ThermostatConfig,
     ThermostatController,
 )
 from custom_components.learning_thermostat.const import LEARNING_MODEL_PHYSICAL
+from custom_components.learning_thermostat.state import ThermostatMode
 
 
 class StubOptimizer:
@@ -118,7 +118,7 @@ async def test_run_control_cycle_turns_switches_off_when_hvac_is_off() -> None:
         optimizer_factory=lambda _name, _config: optimizer,
         now=lambda: fixed_now,
     )
-    controller.set_hvac_mode(HVACMode.OFF)
+    controller.set_hvac_mode(ThermostatMode.OFF)
 
     switch_calls: list[bool] = []
     persisted_payloads: list[dict] = []
@@ -287,7 +287,7 @@ def test_reset_learning_preserves_history_without_debug_noise() -> None:
         optimizer_factory=lambda _name, _config: optimizer,
     )
     controller.restore(
-        hvac_mode=HVACMode.HEAT,
+        hvac_mode=ThermostatMode.HEAT,
         target_temperature=21.5,
         stored_payload={
             "learning_state": {

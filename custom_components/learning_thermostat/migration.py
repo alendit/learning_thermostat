@@ -9,12 +9,12 @@ from typing import Any, Mapping
 
 from homeassistant.util import dt as dt_util
 
+from .state import build_entry_payload
 from .storage import (
     STORAGE_DATA_KEY,
     STORAGE_KEY,
     STORAGE_MINOR_VERSION,
     STORAGE_VERSION,
-    build_entry_payload,
 )
 
 

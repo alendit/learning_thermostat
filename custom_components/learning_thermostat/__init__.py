@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 
 from .const import (
     DATA_RUNTIMES,
     DATA_STORAGE,
     DOMAIN,
-    PLATFORMS,
 )
 from .runtime import async_remove_runtime
 from .storage import LearningStateStore
+
+PLATFORMS = [Platform.CLIMATE, Platform.SENSOR]
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:

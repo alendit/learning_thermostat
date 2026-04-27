@@ -56,7 +56,8 @@ from .const import (
 )
 from .runtime import LearningThermostatRuntime, async_get_or_create_runtime
 from .solar import build_solar_sample
-from .storage import LearningEntryPayload, LearningStateStore
+from .state import LearningEntryPayload, ThermostatMode
+from .storage import LearningStateStore
 
 try:
     from astral import Observer
@@ -145,12 +146,12 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
     @property
     def hvac_mode(self) -> HVACMode:
         """Return the current HVAC mode."""
-        return self._controller.hvac_mode
+        return _to_hvac_mode(self._controller.hvac_mode)
 
     @property
     def hvac_action(self) -> HVACAction:
         """Return the current HVAC action."""
-        if self._controller.hvac_mode == HVACMode.OFF:
+        if self._controller.hvac_mode == ThermostatMode.OFF:
             return HVACAction.OFF
         return HVACAction.HEATING if self._is_any_switch_active() else HVACAction.IDLE
 
@@ -240,7 +241,7 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Set the HVAC mode."""
-        self._controller.set_hvac_mode(hvac_mode)
+        self._controller.set_hvac_mode(_to_thermostat_mode(hvac_mode))
         await self._async_run_control_cycle(force=True)
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
@@ -334,12 +335,12 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
 
     async def _async_restore_runtime_state(self) -> None:
         """Restore the HA and learning state from storage."""
-        hvac_mode = HVACMode.HEAT
+        hvac_mode = ThermostatMode.HEAT
         restored_target: float | None = None
         old_state = await self.async_get_last_state()
         if old_state is not None:
             if old_state.state in (HVACMode.HEAT, HVACMode.OFF):
-                hvac_mode = HVACMode(old_state.state)
+                hvac_mode = _to_thermostat_mode(HVACMode(old_state.state))
             restored_target = _coerce_float(old_state.attributes.get(ATTR_TEMPERATURE))
 
         stored = await self._store.async_get_entry(self._entry.entry_id)
@@ -685,6 +686,16 @@ def _coerce_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _to_thermostat_mode(hvac_mode: HVACMode) -> ThermostatMode:
+    """Map Home Assistant HVAC modes into the controller mode contract."""
+    return ThermostatMode.OFF if hvac_mode == HVACMode.OFF else ThermostatMode.HEAT
+
+
+def _to_hvac_mode(mode: ThermostatMode) -> HVACMode:
+    """Map the controller mode contract into Home Assistant HVAC modes."""
+    return HVACMode.OFF if mode == ThermostatMode.OFF else HVACMode.HEAT
 
 
 def _async_ensure_entity_services_registered(hass: HomeAssistant) -> None:

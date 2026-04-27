@@ -3,41 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, TypedDict
+from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
 from .const import DOMAIN
+from .state import LearningEntryPayload
 
 STORAGE_VERSION = 1
 STORAGE_MINOR_VERSION = 1
 STORAGE_KEY = f"{DOMAIN}_state"
 STORAGE_DATA_KEY = "entries"
-
-
-class LearningEntryPayload(TypedDict):
-    """Stored state for one thermostat entry."""
-
-    learning_state: dict[str, Any] | None
-    learning_last_tick: str | None
-    current_temperature: float | None
-    outside_temperature: float | None
-
-
-def build_entry_payload(
-    learning_state: dict[str, Any] | None,
-    learning_last_tick: str | None,
-    current_temperature: float | None,
-    outside_temperature: float | None,
-) -> LearningEntryPayload:
-    """Build one stored entry payload."""
-    return {
-        "learning_state": learning_state,
-        "learning_last_tick": learning_last_tick,
-        "current_temperature": current_temperature,
-        "outside_temperature": outside_temperature,
-    }
 
 
 class LearningStateStore:

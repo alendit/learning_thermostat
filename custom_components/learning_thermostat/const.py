@@ -2,12 +2,8 @@
 
 from __future__ import annotations
 
-from homeassistant.const import Platform
-
 DOMAIN = "learning_thermostat"
 NAME = "Learning Thermostat"
-
-PLATFORMS = [Platform.CLIMATE, Platform.SENSOR]
 
 CONF_UNDERLYING_ENTITY_IDS = "underlying_entity_ids"
 CONF_TEMPERATURE_SENSOR_ENTITY_ID = "temperature_sensor_entity_id"
