@@ -6,7 +6,150 @@ import numpy as np
 import pytest
 
 from custom_components.learning_thermostat.const import LEARNING_MODEL_PHYSICAL
-from custom_components.learning_thermostat.optimizer import LearningSwitchOptimizer
+from custom_components.learning_thermostat.optimizer import (
+    MODEL_SCHEMA_VERSION,
+    LearningSwitchOptimizer,
+)
+
+
+def test_snapshot_contract_keys_and_model_metadata_for_supported_models() -> None:
+    """The persisted optimizer snapshot contract should stay stable."""
+    cases = [
+        ({}, "Linear", "linear", 19),
+        ({"use_solar_feature": True}, "Linear", "linear_solar_orientation", 37),
+        ({"learning_model": LEARNING_MODEL_PHYSICAL}, "Physical", "physical", 10),
+        (
+            {"learning_model": LEARNING_MODEL_PHYSICAL, "use_solar_feature": True},
+            "Physical",
+            "physical_solar_orientation",
+            19,
+        ),
+    ]
+
+    for config, model_label, model_id, weight_count in cases:
+        optimizer = LearningSwitchOptimizer(
+            "zone_contract",
+            config={"history_steps": 6, "lookahead_steps": 8, **config},
+        )
+
+        snapshot = optimizer.snapshot_state()
+
+        assert set(snapshot) == {
+            "weights",
+            "model",
+            "model_id",
+            "model_schema_version",
+            "history",
+            "last_u",
+            "last_plan",
+            "solar_orientation_azimuth",
+            "solar_orientation_confidence",
+            "solar_orientation_score",
+            "eta",
+            "base_eta",
+            "prev_feature",
+            "config",
+            "solar_orientation",
+        }
+        assert set(snapshot["history"]) == {
+            "t_room",
+            "t_out",
+            "solar",
+            "solar_samples",
+            "u",
+            "pred_next",
+            "pred_abs_error",
+            "pred_timestamps",
+            "weight_abs_update",
+            "weight_delta_abs_latest",
+            "k_step_abs_error",
+            "k_step_pred_improvement",
+        }
+        assert set(snapshot["config"]) == {
+            "lookahead_steps",
+            "learning_rate",
+            "l2_reg",
+            "w_energy",
+            "history_steps",
+            "history_decay",
+            "error_decay",
+            "default_u_gain_per_hour",
+            "use_solar_feature",
+            "learning_model",
+        }
+        assert snapshot["model"] == model_label
+        assert snapshot["model_id"] == model_id
+        assert snapshot["model_schema_version"] == MODEL_SCHEMA_VERSION
+        assert len(snapshot["weights"]) == weight_count
+
+
+def test_deterministic_linear_tick_sequence_is_preserved() -> None:
+    """A fixed linear sequence should keep the same planning and learning outputs."""
+    optimizer = LearningSwitchOptimizer(
+        "zone_characterization",
+        config={
+            "history_steps": 4,
+            "lookahead_steps": 12,
+            "learning_rate": 0.01,
+            "w_energy": 0.02,
+        },
+    )
+    rows = [
+        (19.0, 6.0, 21.0, 0),
+        (19.1, 6.5, 21.0, 1),
+        (19.2, 7.0, 21.0, 1),
+    ]
+
+    results = [
+        optimizer.tick(
+            t_room=t_room,
+            t_out=t_out,
+            t_set=t_set,
+            t_out_forecast=[t_out] * 12,
+            current_u=current_u,
+            step_minutes=15,
+            timestamp=1_700_000_000 + index * 900,
+        )
+        for index, (t_room, t_out, t_set, current_u) in enumerate(rows)
+    ]
+
+    assert [result["u_planned"] for result in results] == [1, 1, 1]
+    assert [result["start_step"] for result in results] == [0, 0, 0]
+    assert [result["stop_step"] for result in results] == [12, 12, 12]
+    assert [result["lookahead_steps"] for result in results] == [12, 12, 12]
+    assert [result["history_len"] for result in results] == [1, 2, 3]
+    assert [result["weights_reset"] for result in results] == [True, False, False]
+    assert [result["planned_states"] for result in results] == [[1] * 12] * 3
+    assert [result["forecast_temps"][0] for result in results] == [6.0, 6.5, 7.0]
+    assert [result["t_pred_off"] for result in results] == pytest.approx(
+        [19.0, 19.101829113117265, 19.205659100136977]
+    )
+    assert [result["t_pred_on"] for result in results] == pytest.approx(
+        [19.025, 19.12865713248453, 19.233907463651537]
+    )
+
+    snapshot = optimizer.snapshot_state()
+
+    assert snapshot["history"]["t_room"] == [19.2, 19.1, 19.0]
+    assert snapshot["history"]["t_out"] == [7.0, 6.5, 6.0]
+    assert snapshot["history"]["u"] == [1, 1, 0]
+    assert snapshot["history"]["k_step_abs_error"] == {
+        "1": {"count": 2, "mean": pytest.approx(0.07317143375773583)},
+        "2": {"count": 1, "mean": pytest.approx(0.1499990000000011)},
+    }
+    assert snapshot["history"]["k_step_pred_improvement"] == {
+        "1": {"count": 2, "mean": pytest.approx(0.026828566242263818)},
+        "2": {"count": 1, "mean": pytest.approx(0.050000999999998186)},
+    }
+    assert snapshot["weights"][:4] == pytest.approx(
+        [
+            0.0001995544334208881,
+            -0.0000665181444736406,
+            -0.0000665181444736406,
+            -0.0000665181444736406,
+        ]
+    )
+    assert snapshot["last_plan"] == {"start_step": 0, "stop_step": 12}
 
 
 def test_snapshot_restore_round_trip() -> None:
