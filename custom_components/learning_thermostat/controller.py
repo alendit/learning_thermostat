@@ -286,9 +286,7 @@ class ThermostatController:
     def reset_learning(self, preserve_history: bool = True) -> None:
         """Reset persisted learning while keeping durable history when requested."""
         previous_state = self._learning_state if preserve_history else None
-        optimizer = self._optimizer_factory(
-            self.config.name, self._learning_config
-        )
+        optimizer = self._optimizer_factory(self.config.name, self._learning_config)
         self._optimizer = optimizer
         self._learning_result = None
         base_state = optimizer.snapshot_state()

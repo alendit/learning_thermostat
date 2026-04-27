@@ -351,9 +351,7 @@ async def test_solar_available_after_optimizer_exists_rebuilds_from_snapshot() -
 
     assert configs[0].get("use_solar_feature") is None
     assert configs[1]["use_solar_feature"] is True
-    assert second.restore_calls == [
-        {"history": {"t_room": [18.0]}, "weights": [1.0]}
-    ]
+    assert second.restore_calls == [{"history": {"t_room": [18.0]}, "weights": [1.0]}]
     assert controller.learning_state == {
         "history": {"t_room": [18.0]},
         "weights": [2.0],
