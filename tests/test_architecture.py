@@ -16,6 +16,7 @@ CORE_MODULES = [
     "optimizer_planning.py",
     "optimizer_state.py",
     "optimizer_tracking.py",
+    "optimizer_types.py",
     "solar.py",
     "state.py",
 ]

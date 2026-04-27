@@ -6,6 +6,8 @@ from typing import Any
 
 import numpy as np
 
+from .optimizer_types import KStepUpdateInput
+
 DYNAMIC_LOOKAHEAD_TOLERANCE = 0.2
 MULTI_STEP_UPDATE_HORIZON = 3
 
@@ -37,10 +39,10 @@ def record_k_step_errors(
     abs_error_history: TrackingStats,
     pred_improvement_history: TrackingStats,
     multi_step_update_horizon: int = MULTI_STEP_UPDATE_HORIZON,
-) -> tuple[dict[int, float], list[dict[str, float | int | list[float]]]]:
+) -> tuple[dict[int, float], list[KStepUpdateInput]]:
     """Update k-step error stats and return absolute errors plus update inputs."""
     errors: dict[int, float] = {}
-    updates: list[dict[str, float | int | list[float]]] = []
+    updates: list[KStepUpdateInput] = []
     _drop_stale(pending_preds, step_index)
     _drop_stale(pending_features, step_index)
     _drop_stale(pending_baseline, step_index)

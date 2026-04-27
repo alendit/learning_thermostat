@@ -15,6 +15,7 @@ from .optimizer_features import (
     sanitize_array,
 )
 from .optimizer_state import coerce_optional_float
+from .optimizer_types import SolarOrientationDiagnostics
 from .solar import (
     SOLAR_ORIENTATION_FEATURE_SIZE,
     build_solar_orientation_features,
@@ -77,7 +78,7 @@ def directional_solar_weight_indices(
     ]
 
 
-def unknown_solar_orientation_diagnostics() -> dict[str, Any]:
+def unknown_solar_orientation_diagnostics() -> SolarOrientationDiagnostics:
     """Return the unknown orientation diagnostics payload."""
     return {
         "azimuth": None,
@@ -100,7 +101,7 @@ def solar_orientation_diagnostics(
     history_steps: int,
     solar_orientation_azimuth: float | None,
     solar_orientation_confidence: float | None,
-) -> dict[str, Any]:
+) -> SolarOrientationDiagnostics:
     """Return the dominant learned solar exposure direction."""
     if not use_solar_feature:
         return unknown_solar_orientation_diagnostics()

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from .const import (
     CONF_LEARNING_MODEL,
@@ -14,6 +14,8 @@ from .const import (
     LEARNING_MODEL_LINEAR,
 )
 from .optimizer import DEFAULT_LEARNING_SWITCH_CONFIG, LearningSwitchOptimizer
+from .optimizer_orientation import unknown_solar_orientation_diagnostics
+from .optimizer_types import OptimizerTickResult, SolarOrientationDiagnostics
 from .state import LearningEntryPayload, ThermostatMode, build_entry_payload
 
 OptimizerFactory = Callable[[str, dict[str, Any]], LearningSwitchOptimizer]
@@ -110,7 +112,7 @@ class ThermostatController:
         self._now = now
         self._optimizer: LearningSwitchOptimizer | None = None
         self._learning_state: dict[str, Any] | None = None
-        self._learning_result: dict[str, Any] | None = None
+        self._learning_result: OptimizerTickResult | None = None
         self._learning_last_tick = None
         self._learning_on_percent: float | None = None
         self._current_temperature: float | None = None
@@ -141,7 +143,7 @@ class ThermostatController:
         return self._learning_state
 
     @property
-    def learning_result(self) -> dict[str, Any] | None:
+    def learning_result(self) -> OptimizerTickResult | None:
         """Return the latest optimizer result."""
         return self._learning_result
 
@@ -171,15 +173,15 @@ class ThermostatController:
         return self._current_solar_sample
 
     @property
-    def solar_orientation_diagnostics(self) -> dict[str, Any]:
+    def solar_orientation_diagnostics(self) -> SolarOrientationDiagnostics:
         """Return optimizer-provided solar orientation diagnostics."""
         if self._optimizer is not None:
             return self._optimizer.solar_orientation_diagnostics()
         state = self._learning_state or {}
         diagnostics = state.get("solar_orientation")
         if isinstance(diagnostics, dict):
-            return diagnostics
-        return {"azimuth": None, "confidence": None, "state": "unknown"}
+            return cast(SolarOrientationDiagnostics, diagnostics)
+        return unknown_solar_orientation_diagnostics()
 
     def restore(
         self,

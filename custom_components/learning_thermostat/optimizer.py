@@ -83,6 +83,7 @@ from .optimizer_tracking import (
     record_k_step_errors,
     select_dynamic_lookahead,
 )
+from .optimizer_types import OptimizerTickResult, SolarOrientationDiagnostics
 from .solar import (
     SOLAR_ORIENTATION_FEATURE_SIZE,
     coerce_solar_sample,
@@ -546,7 +547,7 @@ class LearningSwitchOptimizer:
             return np.zeros_like(self._weights)
         return np.abs(x * self._weights)
 
-    def solar_orientation_diagnostics(self) -> dict:
+    def solar_orientation_diagnostics(self) -> SolarOrientationDiagnostics:
         """Return the dominant learned solar exposure direction."""
         return solar_orientation_diagnostics(
             use_solar_feature=self._use_solar_feature,
@@ -693,7 +694,7 @@ class LearningSwitchOptimizer:
         current_u: int | None = None,
         step_minutes: int | None = None,
         timestamp: float | None = None,
-    ) -> dict:
+    ) -> OptimizerTickResult:
         """Advance one tick: update history, learn weights, plan the next action."""
         tick_start = time.perf_counter()
         try:

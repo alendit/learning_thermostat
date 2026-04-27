@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 import numpy as np
+
+from .optimizer_types import KStepUpdateInput, LearningUpdatePayload
 
 
 @dataclass(frozen=True, slots=True)
@@ -13,7 +14,7 @@ class LearningUpdate:
     """Candidate optimizer weights plus the stable diagnostic payload."""
 
     weights: np.ndarray
-    payload: dict[str, Any]
+    payload: LearningUpdatePayload
 
 
 def compute_single_step_update(
@@ -94,7 +95,7 @@ def compute_multi_step_update(
     *,
     weights: np.ndarray,
     l2_reg: float,
-    updates: list[dict[str, float | int | list[float]]],
+    updates: list[KStepUpdateInput],
     base_eta: float,
     eta: float,
 ) -> LearningUpdate | None:
