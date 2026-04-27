@@ -18,6 +18,10 @@ from custom_components.learning_thermostat.optimizer_history import (
     build_history_arrays,
     update_latest_first_histories,
 )
+from custom_components.learning_thermostat.optimizer_learning import (
+    compute_multi_step_update,
+    compute_single_step_update,
+)
 from custom_components.learning_thermostat.optimizer_tracking import (
     queue_k_step_baseline,
     queue_k_step_features,
@@ -252,31 +256,32 @@ def test_dynamic_lookahead_selection_contract() -> None:
 
 def test_learning_update_payloads_preserve_shape_and_weight_effects() -> None:
     """Single and multi-step learning updates should keep payload compatibility."""
-    optimizer = LearningSwitchOptimizer(
-        "zone_learning",
-        config={"history_steps": 1, "l2_reg": 0.0},
-    )
-    optimizer._weights = np.zeros(4, dtype=float)
+    weights = np.zeros(4, dtype=float)
 
-    update = optimizer._compute_update(
+    update = compute_single_step_update(
+        weights=weights,
+        l2_reg=0.0,
         actual_temp=21.0,
         prev_pred=20.0,
         prev_feature=[1.0, 0.0, 0.0, 1.0],
         base_eta=0.1,
         eta=0.1,
+        fallback_learning_rate=0.01,
     )
 
     assert update is not None
-    assert update["error"] == pytest.approx(1.0)
-    assert update["errors"] == [{"step": 0, "error": 1.0, "weight": 1.0}]
-    assert update["eta_scale"] == pytest.approx(1.0)
-    assert update["steps_used"] == 1
-    assert update["delta"] == pytest.approx([0.1999996, 0.0, 0.0, 0.1999996])
-    assert optimizer._weights.tolist() == pytest.approx(update["delta"])
+    assert update.payload["error"] == pytest.approx(1.0)
+    assert update.payload["errors"] == [{"step": 0, "error": 1.0, "weight": 1.0}]
+    assert update.payload["eta_scale"] == pytest.approx(1.0)
+    assert update.payload["steps_used"] == 1
+    assert update.payload["delta"] == pytest.approx([0.1999996, 0.0, 0.0, 0.1999996])
+    assert update.weights.tolist() == pytest.approx(update.payload["delta"])
+    assert weights.tolist() == [0.0, 0.0, 0.0, 0.0]
 
-    optimizer._weights = np.zeros(4, dtype=float)
-    multi_update = optimizer._compute_update_multi(
-        [
+    multi_update = compute_multi_step_update(
+        weights=weights,
+        l2_reg=0.0,
+        updates=[
             {"horizon": 1, "error": 1.0, "feature": [1.0, 0.0, 0.0, 1.0]},
             {"horizon": 2, "error": -0.5, "feature": [0.0, 1.0, 0.0, 1.0]},
         ],
@@ -285,17 +290,18 @@ def test_learning_update_payloads_preserve_shape_and_weight_effects() -> None:
     )
 
     assert multi_update is not None
-    assert multi_update["error"] == pytest.approx(0.25)
-    assert multi_update["errors"] == [
+    assert multi_update.payload["error"] == pytest.approx(0.25)
+    assert multi_update.payload["errors"] == [
         {"step": 1, "error": 1.0, "weight": 1.0},
         {"step": 2, "error": -0.5, "weight": 1.0},
     ]
-    assert multi_update["eta_scale"] == pytest.approx(0.5)
-    assert multi_update["steps_used"] == 2
-    assert multi_update["delta"] == pytest.approx(
+    assert multi_update.payload["eta_scale"] == pytest.approx(0.5)
+    assert multi_update.payload["steps_used"] == 2
+    assert multi_update.payload["delta"] == pytest.approx(
         [0.0999998, -0.0499999, 0.0, 0.0499999]
     )
-    assert optimizer._weights.tolist() == pytest.approx(multi_update["delta"])
+    assert multi_update.weights.tolist() == pytest.approx(multi_update.payload["delta"])
+    assert weights.tolist() == [0.0, 0.0, 0.0, 0.0]
 
 
 def test_history_helpers_update_latest_first_and_build_model_arrays() -> None:

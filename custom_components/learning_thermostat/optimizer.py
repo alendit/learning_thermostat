@@ -40,6 +40,7 @@ from .optimizer_features import (
     u_weight_start,
 )
 from .optimizer_history import build_history_arrays, update_latest_first_histories
+from .optimizer_learning import compute_multi_step_update, compute_single_step_update
 from .optimizer_planning import (
     effective_solar_orientation,
     find_start_stop,
@@ -677,163 +678,6 @@ class LearningSwitchOptimizer:
             self._prev_feature = None
             self._prev_orientation_input = None
 
-    def _compute_update(
-        self,
-        actual_temp: float,
-        prev_pred: float | None,
-        prev_feature: list[float] | None,
-        base_eta: float,
-        eta: float,
-    ) -> dict | None:
-        """Compute a normalized gradient update from the previous rollout."""
-        if prev_pred is None or prev_feature is None:
-            _LOGGER.warning(
-                "%s - Learning update skipped: missing previous prediction/feature",
-                self._name,
-            )
-            return None
-
-        try:
-            base_eta = float(base_eta)
-        except (TypeError, ValueError):
-            base_eta = float(self._config.get("learning_rate", 0.01))
-        if not np.isfinite(base_eta) or base_eta < 0.0:
-            base_eta = float(self._config.get("learning_rate", 0.01))
-        try:
-            eta = float(eta)
-        except (TypeError, ValueError):
-            eta = base_eta
-        if not np.isfinite(eta) or eta < 0.0:
-            eta = base_eta
-
-        try:
-            error = actual_temp - float(prev_pred)
-            feature = np.array(prev_feature, dtype=float)
-        except (TypeError, ValueError):
-            _LOGGER.warning(
-                "%s - Learning update skipped: invalid previous prediction/feature",
-                self._name,
-            )
-            return None
-
-        if not np.isfinite(error) or not np.all(np.isfinite(feature)):
-            _LOGGER.warning(
-                "%s - Learning update skipped: non-finite error/features", self._name
-            )
-            return None
-
-        denom = float(np.dot(feature, feature)) / float(feature.size)
-        if not np.isfinite(denom) or denom <= 0:
-            _LOGGER.warning(
-                "%s - Learning update skipped: invalid feature norm", self._name
-            )
-            return None
-
-        gradient = error * (feature / (denom + 1e-6))
-        reg = 0.0
-        if self._l2_reg:
-            reg_weights = self._weights.copy()
-            if reg_weights.size:
-                reg_weights[-1] = 0.0
-            reg = self._l2_reg * reg_weights
-        delta = eta * (gradient - reg)
-        self._weights = self._weights + delta
-        self._ensure_weights_finite()
-        return {
-            "error": error,
-            "errors": [{"step": 0, "error": error, "weight": 1.0}],
-            "eta": eta,
-            "base_eta": base_eta,
-            "eta_scale": eta / base_eta if base_eta else None,
-            "l2_reg": self._l2_reg,
-            "grad_norm": (
-                float(np.linalg.norm(gradient))
-                if np.all(np.isfinite(gradient))
-                else None
-            ),
-            "abs_update_max": (
-                float(np.max(np.abs(delta))) if np.all(np.isfinite(delta)) else None
-            ),
-            "delta": delta.tolist() if np.all(np.isfinite(delta)) else None,
-            "steps_used": 1,
-        }
-
-    def _compute_update_multi(
-        self,
-        updates: list[dict[str, float | int | list[float]]],
-        base_eta: float,
-        eta: float,
-    ) -> dict | None:
-        """Compute a normalized gradient update from multiple steps."""
-        if not updates:
-            return None
-
-        gradients = None
-        total_weight = 0.0
-        errors: list[dict[str, float | int]] = []
-        for update in updates:
-            error = update.get("error")
-            feature = update.get("feature")
-            step = update.get("horizon")
-            if error is None or feature is None:
-                continue
-            try:
-                error_val = float(error)
-                feature_vec = np.array(feature, dtype=float)
-            except (TypeError, ValueError):
-                continue
-            if not np.isfinite(error_val) or not np.all(np.isfinite(feature_vec)):
-                continue
-            denom = float(np.dot(feature_vec, feature_vec)) / float(feature_vec.size)
-            if not np.isfinite(denom) or denom <= 0:
-                continue
-            weight = 1.0
-            gradient = weight * error_val * (feature_vec / (denom + 1e-6))
-            gradients = gradient if gradients is None else gradients + gradient
-            total_weight += weight
-            errors.append(
-                {
-                    "step": int(step) if isinstance(step, (int, float)) else 0,
-                    "error": error_val,
-                    "weight": weight,
-                }
-            )
-
-        if gradients is None or total_weight <= 0:
-            return None
-
-        gradients = gradients / total_weight
-        reg = 0.0
-        if self._l2_reg:
-            reg_weights = self._weights.copy()
-            if reg_weights.size:
-                reg_weights[-1] = 0.0
-            reg = self._l2_reg * reg_weights
-        delta = eta * (gradients - reg)
-        self._weights = self._weights + delta
-        self._ensure_weights_finite()
-        mean_error = (
-            float(np.mean([entry["error"] for entry in errors])) if errors else None
-        )
-        return {
-            "error": mean_error,
-            "errors": errors,
-            "eta": eta,
-            "base_eta": base_eta,
-            "eta_scale": eta / base_eta if base_eta else None,
-            "l2_reg": self._l2_reg,
-            "grad_norm": (
-                float(np.linalg.norm(gradients))
-                if np.all(np.isfinite(gradients))
-                else None
-            ),
-            "abs_update_max": (
-                float(np.max(np.abs(delta))) if np.all(np.isfinite(delta)) else None
-            ),
-            "delta": delta.tolist() if np.all(np.isfinite(delta)) else None,
-            "steps_used": len(errors),
-        }
-
     def tick(
         self,
         t_room: float,
@@ -1050,11 +894,27 @@ class LearningSwitchOptimizer:
         self._base_eta = base_eta
         self._last_eta = eta
 
-        update = self._compute_update_multi(k_step_updates, base_eta, eta)
-        if update is None:
-            update = self._compute_update(
-                t_room, prev_pred, self._prev_feature, base_eta, eta
+        learning_update = compute_multi_step_update(
+            weights=self._weights,
+            l2_reg=self._l2_reg,
+            updates=k_step_updates,
+            base_eta=base_eta,
+            eta=eta,
+        )
+        if learning_update is None:
+            learning_update = compute_single_step_update(
+                weights=self._weights,
+                l2_reg=self._l2_reg,
+                actual_temp=t_room,
+                prev_pred=prev_pred,
+                prev_feature=self._prev_feature,
+                base_eta=base_eta,
+                eta=eta,
+                fallback_learning_rate=DEFAULT_LEARNING_SWITCH_CONFIG["learning_rate"],
             )
+        update = learning_update.payload if learning_update is not None else None
+        if learning_update is not None:
+            self._weights = learning_update.weights
         if self._ensure_weights_finite():
             weights_reset = True
         self._cap_u_weights()
