@@ -21,6 +21,18 @@ CORE_MODULES = [
     "solar.py",
     "state.py",
 ]
+HA_ADAPTER_MODULES = {
+    "__init__.py",
+    "climate.py",
+    "config_flow.py",
+    "environment.py",
+    "migration.py",
+    "runtime.py",
+    "sensor.py",
+    "services.py",
+    "storage.py",
+    "switches.py",
+}
 
 
 def test_core_modules_do_not_import_home_assistant() -> None:
@@ -40,6 +52,20 @@ def test_core_modules_do_not_define_broad_fake_interfaces() -> None:
 
         for token in forbidden_tokens:
             assert token not in text
+
+
+def test_home_assistant_imports_stay_in_adapter_modules() -> None:
+    """Home Assistant imports should stay out of core/domain modules."""
+    component_dir = PROJECT_ROOT / "custom_components" / "learning_thermostat"
+    for path in component_dir.glob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        imports_home_assistant = (
+            "from homeassistant" in text or "import homeassistant" in text
+        )
+
+        if path.name in HA_ADAPTER_MODULES:
+            continue
+        assert not imports_home_assistant, path.name
 
 
 def _component_path(module: str) -> Path:
