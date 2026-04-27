@@ -130,6 +130,7 @@ class ThermostatController:
         now: Callable[[], datetime] = _utcnow,
     ) -> None:
         self.config = config
+        self._learning_config = dict(config.learning_config)
         self._optimizer_factory = optimizer_factory
         self._now = now
         self._optimizer: Optimizer | None = None
@@ -257,11 +258,36 @@ class ThermostatController:
         self._current_solar = solar
         self._current_solar_sample = solar_sample
 
+    def set_solar_available(self, enabled: bool) -> None:
+        """Update solar feature availability for optimizer construction."""
+        enabled = bool(enabled)
+        if bool(self._learning_config.get("use_solar_feature")) == enabled:
+            return
+
+        snapshot = (
+            self._optimizer.snapshot_state()
+            if self._optimizer is not None
+            else self._learning_state
+        )
+        self._learning_config = {
+            **self._learning_config,
+            "use_solar_feature": enabled,
+        }
+        if self._optimizer is None:
+            return
+
+        self._optimizer = self._optimizer_factory(
+            self.config.name, self._learning_config
+        )
+        if snapshot is not None:
+            self._optimizer.restore_state(snapshot)
+        self._learning_state = self._optimizer.snapshot_state()
+
     def reset_learning(self, preserve_history: bool = True) -> None:
         """Reset persisted learning while keeping durable history when requested."""
         previous_state = self._learning_state if preserve_history else None
         optimizer = self._optimizer_factory(
-            self.config.name, self.config.learning_config
+            self.config.name, self._learning_config
         )
         self._optimizer = optimizer
         self._learning_result = None
@@ -362,7 +388,7 @@ class ThermostatController:
         """Build or restore the optimizer on demand."""
         if self._optimizer is None:
             self._optimizer = self._optimizer_factory(
-                self.config.name, self.config.learning_config
+                self.config.name, self._learning_config
             )
             if self._learning_state is not None:
                 self._optimizer.restore_state(self._learning_state)

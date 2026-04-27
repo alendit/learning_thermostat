@@ -267,6 +267,99 @@ async def test_run_control_cycle_falls_back_to_forecast_outside_temperature_for_
     assert optimizer.tick_calls[0]["t_out"] == 6.5
 
 
+@pytest.mark.asyncio
+async def test_solar_available_before_first_tick_configures_optimizer() -> None:
+    """Solar detection before the first tick should be explicit controller state."""
+    fixed_now = datetime(2026, 4, 21, 12, 0, tzinfo=UTC)
+    optimizer = StubOptimizer()
+    configs: list[dict] = []
+
+    def optimizer_factory(_name: str, config: dict) -> StubOptimizer:
+        configs.append(dict(config))
+        return optimizer
+
+    controller = ThermostatController(
+        _config(),
+        optimizer_factory=optimizer_factory,
+        now=lambda: fixed_now,
+    )
+    controller.set_solar_available(True)
+    controller.update_current_temperature(18.0)
+    controller.update_outside_temperature(7.0)
+
+    async def turn_switches(_turn_on: bool) -> None:
+        return None
+
+    async def persist(_payload: dict) -> None:
+        return None
+
+    await controller.run_control_cycle(
+        force=True,
+        forecast_temperatures=[6.5, 6.0],
+        solar=120.0,
+        solar_forecast=[100.0, 80.0],
+        solar_sample={"flux": 120.0, "azimuth": 270.0, "elevation": 30.0},
+        solar_sample_forecast=[],
+        current_switch_active=False,
+        turn_switches=turn_switches,
+        persist=persist,
+    )
+
+    assert configs[0]["use_solar_feature"] is True
+
+
+@pytest.mark.asyncio
+async def test_solar_available_after_optimizer_exists_rebuilds_from_snapshot() -> None:
+    """Enabling solar later should preserve the current optimizer snapshot."""
+    fixed_now = datetime(2026, 4, 21, 12, 0, tzinfo=UTC)
+    first = StubOptimizer(snapshot={"history": {"t_room": [18.0]}, "weights": [1.0]})
+    second = StubOptimizer(snapshot={"history": {"t_room": [18.0]}, "weights": [2.0]})
+    optimizers = [first, second]
+    configs: list[dict] = []
+
+    def optimizer_factory(_name: str, config: dict) -> StubOptimizer:
+        configs.append(dict(config))
+        return optimizers.pop(0)
+
+    controller = ThermostatController(
+        _config(),
+        optimizer_factory=optimizer_factory,
+        now=lambda: fixed_now,
+    )
+    controller.update_current_temperature(18.0)
+    controller.update_outside_temperature(7.0)
+
+    async def turn_switches(_turn_on: bool) -> None:
+        return None
+
+    async def persist(_payload: dict) -> None:
+        return None
+
+    await controller.run_control_cycle(
+        force=True,
+        forecast_temperatures=[6.5],
+        solar=None,
+        solar_forecast=[],
+        solar_sample=None,
+        solar_sample_forecast=[],
+        current_switch_active=False,
+        turn_switches=turn_switches,
+        persist=persist,
+    )
+
+    controller.set_solar_available(True)
+
+    assert configs[0].get("use_solar_feature") is None
+    assert configs[1]["use_solar_feature"] is True
+    assert second.restore_calls == [
+        {"history": {"t_room": [18.0]}, "weights": [1.0]}
+    ]
+    assert controller.learning_state == {
+        "history": {"t_room": [18.0]},
+        "weights": [2.0],
+    }
+
+
 def test_reset_learning_preserves_history_without_debug_noise() -> None:
     """Reset should keep durable history and drop transient diagnostics."""
     base_snapshot = {

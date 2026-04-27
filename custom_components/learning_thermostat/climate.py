@@ -192,8 +192,9 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
         self._detected_solar = _detect_pirate_weather_solar_entities(
             self.hass, self._config.outdoor_entity_id
         )
-        if self._detected_solar.current_entity_id:
-            self._config.learning_config["use_solar_feature"] = True
+        self._controller.set_solar_available(
+            self._detected_solar.current_entity_id is not None
+        )
         await self._async_refresh_temperature_inputs()
 
         self.async_on_remove(
