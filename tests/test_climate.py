@@ -136,9 +136,7 @@ async def test_entity_services_target_all_learning_thermostat_entries(hass) -> N
     )
     await hass.async_block_till_done()
 
-    assert [call.data["entity_id"] for call in turn_on_calls] == [
-        "switch.living_floor"
-    ]
+    assert [call.data["entity_id"] for call in turn_on_calls] == ["switch.living_floor"]
     kitchen_state = hass.states.get("climate.kitchen_floor")
     living_state = hass.states.get("climate.living_floor")
     assert kitchen_state is not None
