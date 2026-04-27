@@ -35,6 +35,9 @@ class StubOptimizer:
     def snapshot_state(self) -> dict:
         return self.snapshot
 
+    def solar_orientation_diagnostics(self) -> dict:
+        return {"azimuth": None, "confidence": None, "state": "unknown"}
+
     def tick(
         self,
         t_room: float,

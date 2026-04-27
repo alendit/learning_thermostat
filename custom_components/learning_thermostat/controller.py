@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Protocol
+from typing import Any
 
 from .const import (
     CONF_LEARNING_MODEL,
@@ -16,34 +16,7 @@ from .const import (
 from .optimizer import DEFAULT_LEARNING_SWITCH_CONFIG, LearningSwitchOptimizer
 from .state import LearningEntryPayload, ThermostatMode, build_entry_payload
 
-
-class Optimizer(Protocol):
-    """Protocol for the learning optimizer dependency."""
-
-    def restore_state(self, state: dict[str, Any] | None) -> None:
-        """Restore one persisted optimizer snapshot."""
-
-    def snapshot_state(self) -> dict[str, Any]:
-        """Return the current optimizer snapshot."""
-
-    def tick(
-        self,
-        t_room: float,
-        t_out: float,
-        t_set: float,
-        t_out_forecast: list[float],
-        solar: float | None,
-        solar_forecast: list[float],
-        solar_sample: dict[str, Any] | None,
-        solar_sample_forecast: list[dict[str, Any]],
-        current_u: int,
-        step_minutes: int,
-        timestamp: float | None = None,
-    ) -> dict[str, Any]:
-        """Advance the optimizer by one control interval."""
-
-
-OptimizerFactory = Callable[[str, dict[str, Any]], Optimizer]
+OptimizerFactory = Callable[[str, dict[str, Any]], LearningSwitchOptimizer]
 SwitchWriter = Callable[[bool], Awaitable[None]]
 StatePersister = Callable[[LearningEntryPayload], Awaitable[None]]
 
@@ -53,7 +26,9 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-def _default_optimizer_factory(name: str, config: dict[str, Any]) -> Optimizer:
+def _default_optimizer_factory(
+    name: str, config: dict[str, Any]
+) -> LearningSwitchOptimizer:
     """Build the concrete optimizer dependency."""
     return LearningSwitchOptimizer(name, config=config)
 
@@ -133,7 +108,7 @@ class ThermostatController:
         self._learning_config = dict(config.learning_config)
         self._optimizer_factory = optimizer_factory
         self._now = now
-        self._optimizer: Optimizer | None = None
+        self._optimizer: LearningSwitchOptimizer | None = None
         self._learning_state: dict[str, Any] | None = None
         self._learning_result: dict[str, Any] | None = None
         self._learning_last_tick = None
@@ -198,9 +173,7 @@ class ThermostatController:
     @property
     def solar_orientation_diagnostics(self) -> dict[str, Any]:
         """Return optimizer-provided solar orientation diagnostics."""
-        if self._optimizer is not None and hasattr(
-            self._optimizer, "solar_orientation_diagnostics"
-        ):
+        if self._optimizer is not None:
             return self._optimizer.solar_orientation_diagnostics()
         state = self._learning_state or {}
         diagnostics = state.get("solar_orientation")
@@ -382,7 +355,7 @@ class ThermostatController:
         await persist(self.build_persisted_payload())
         return True
 
-    def _ensure_optimizer(self) -> Optimizer:
+    def _ensure_optimizer(self) -> LearningSwitchOptimizer:
         """Build or restore the optimizer on demand."""
         if self._optimizer is None:
             self._optimizer = self._optimizer_factory(
