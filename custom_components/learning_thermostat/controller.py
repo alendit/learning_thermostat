@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
@@ -15,6 +16,19 @@ from .state import LearningEntryPayload, ThermostatMode, build_entry_payload
 OptimizerFactory = Callable[[str, dict[str, Any]], LearningSwitchOptimizer]
 SwitchWriter = Callable[[bool], Awaitable[None]]
 StatePersister = Callable[[LearningEntryPayload], Awaitable[None]]
+
+
+@dataclass(frozen=True, slots=True)
+class ControlCycleInput:
+    """Core inputs for one thermostat control cycle."""
+
+    force: bool
+    forecast_temperatures: list[float]
+    solar: float | None
+    solar_forecast: list[float]
+    solar_sample: dict[str, Any] | None
+    solar_sample_forecast: list[dict[str, Any]]
+    current_switch_active: bool
 
 
 def _utcnow() -> datetime:
@@ -233,14 +247,8 @@ class ThermostatController:
 
     async def run_control_cycle(
         self,
+        cycle_input: ControlCycleInput,
         *,
-        force: bool,
-        forecast_temperatures: list[float],
-        solar: float | None,
-        solar_forecast: list[float],
-        solar_sample: dict[str, Any] | None,
-        solar_sample_forecast: list[dict[str, Any]],
-        current_switch_active: bool,
         turn_switches: SwitchWriter,
         persist: StatePersister,
     ) -> bool:
@@ -251,7 +259,7 @@ class ThermostatController:
             await persist(self.build_persisted_payload())
             return True
 
-        if not force and self._learning_last_tick is not None:
+        if not cycle_input.force and self._learning_last_tick is not None:
             elapsed = self._now() - self._learning_last_tick
             if elapsed < timedelta(minutes=self.config.cycle_minutes):
                 return False
@@ -260,8 +268,8 @@ class ThermostatController:
             return False
 
         outside_temperature = self._outside_temperature
-        if outside_temperature is None and forecast_temperatures:
-            outside_temperature = forecast_temperatures[0]
+        if outside_temperature is None and cycle_input.forecast_temperatures:
+            outside_temperature = cycle_input.forecast_temperatures[0]
         if outside_temperature is None:
             outside_temperature = self._current_temperature
 
@@ -271,12 +279,12 @@ class ThermostatController:
             self._current_temperature,
             outside_temperature,
             self._target_temperature,
-            forecast_temperatures,
-            solar,
-            solar_forecast,
-            solar_sample,
-            solar_sample_forecast,
-            current_u=1 if current_switch_active else 0,
+            cycle_input.forecast_temperatures,
+            cycle_input.solar,
+            cycle_input.solar_forecast,
+            cycle_input.solar_sample,
+            cycle_input.solar_sample_forecast,
+            current_u=1 if cycle_input.current_switch_active else 0,
             step_minutes=self.config.cycle_minutes,
             timestamp=now.timestamp(),
         )

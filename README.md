@@ -42,6 +42,24 @@ Underlying on/off control entities may be either Home Assistant `switch`
 entities or `input_boolean` helpers, as long as they support standard
 `turn_on` / `turn_off` services.
 
+## Diagnostics And Learning State
+
+The integration stores the full learning snapshot internally so restore,
+reset, and migration can keep the model state intact. The climate entity does
+not expose that raw optimizer snapshot as Home Assistant attributes.
+
+Climate attributes expose compact diagnostics instead:
+
+- `learning_model`, `learning_model_id`, and schema version
+- current outdoor and solar inputs
+- learned solar orientation diagnostics
+- `learning_plan` with the current plan, lookahead, forecast, and prediction
+  summary
+- `learning_update` and `learning_tracking` with compact error/update metrics
+
+This keeps the recorder attribute payload small while preserving full learning
+state in the integration storage file.
+
 ## Migration
 
 The migration utility reads `learning_state` and `learning_last_tick` from an

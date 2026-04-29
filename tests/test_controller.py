@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 import pytest
 
 from custom_components.learning_thermostat.controller import (
+    ControlCycleInput,
     ThermostatConfig,
     ThermostatController,
 )
@@ -86,6 +87,20 @@ def _config() -> ThermostatConfig:
     )
 
 
+def _cycle_input(**overrides) -> ControlCycleInput:
+    values = {
+        "force": True,
+        "forecast_temperatures": [],
+        "solar": None,
+        "solar_forecast": [],
+        "solar_sample": None,
+        "solar_sample_forecast": [],
+        "current_switch_active": False,
+    }
+    values.update(overrides)
+    return ControlCycleInput(**values)
+
+
 def test_config_from_mapping_passes_learning_model_to_optimizer_config() -> None:
     """Config mapping should keep Home Assistant glue thin for model selection."""
     data = {
@@ -133,13 +148,7 @@ async def test_run_control_cycle_turns_switches_off_when_hvac_is_off() -> None:
         persisted_payloads.append(payload)
 
     ran = await controller.run_control_cycle(
-        force=False,
-        forecast_temperatures=[],
-        solar=None,
-        solar_forecast=[],
-        solar_sample=None,
-        solar_sample_forecast=[],
-        current_switch_active=True,
+        _cycle_input(force=False, current_switch_active=True),
         turn_switches=turn_switches,
         persist=persist,
     )
@@ -184,16 +193,16 @@ async def test_run_control_cycle_delegates_to_optimizer_and_persists_state() -> 
         persisted_payloads.append(payload)
 
     ran = await controller.run_control_cycle(
-        force=True,
-        forecast_temperatures=[6.5, 6.0],
-        solar=120.0,
-        solar_forecast=[100.0, 80.0],
-        solar_sample={"flux": 120.0, "azimuth": 270.0, "elevation": 30.0},
-        solar_sample_forecast=[
-            {"flux": 100.0, "azimuth": 270.0, "elevation": 30.0},
-            {"flux": 80.0, "azimuth": 270.0, "elevation": 30.0},
-        ],
-        current_switch_active=False,
+        _cycle_input(
+            forecast_temperatures=[6.5, 6.0],
+            solar=120.0,
+            solar_forecast=[100.0, 80.0],
+            solar_sample={"flux": 120.0, "azimuth": 270.0, "elevation": 30.0},
+            solar_sample_forecast=[
+                {"flux": 100.0, "azimuth": 270.0, "elevation": 30.0},
+                {"flux": 80.0, "azimuth": 270.0, "elevation": 30.0},
+            ],
+        ),
         turn_switches=turn_switches,
         persist=persist,
     )
@@ -255,13 +264,7 @@ async def test_run_control_cycle_falls_back_to_forecast_outside_temperature_for_
         return None
 
     ran = await controller.run_control_cycle(
-        force=True,
-        forecast_temperatures=[6.5, 6.0],
-        solar=None,
-        solar_forecast=[],
-        solar_sample=None,
-        solar_sample_forecast=[],
-        current_switch_active=False,
+        _cycle_input(forecast_temperatures=[6.5, 6.0]),
         turn_switches=turn_switches,
         persist=persist,
     )
@@ -297,13 +300,12 @@ async def test_solar_available_before_first_tick_configures_optimizer() -> None:
         return None
 
     await controller.run_control_cycle(
-        force=True,
-        forecast_temperatures=[6.5, 6.0],
-        solar=120.0,
-        solar_forecast=[100.0, 80.0],
-        solar_sample={"flux": 120.0, "azimuth": 270.0, "elevation": 30.0},
-        solar_sample_forecast=[],
-        current_switch_active=False,
+        _cycle_input(
+            forecast_temperatures=[6.5, 6.0],
+            solar=120.0,
+            solar_forecast=[100.0, 80.0],
+            solar_sample={"flux": 120.0, "azimuth": 270.0, "elevation": 30.0},
+        ),
         turn_switches=turn_switches,
         persist=persist,
     )
@@ -339,13 +341,7 @@ async def test_solar_available_after_optimizer_exists_rebuilds_from_snapshot() -
         return None
 
     await controller.run_control_cycle(
-        force=True,
-        forecast_temperatures=[6.5],
-        solar=None,
-        solar_forecast=[],
-        solar_sample=None,
-        solar_sample_forecast=[],
-        current_switch_active=False,
+        _cycle_input(forecast_temperatures=[6.5]),
         turn_switches=turn_switches,
         persist=persist,
     )

@@ -49,6 +49,7 @@ from .environment import (
 )
 from .runtime import LearningThermostatRuntime, async_get_or_create_runtime
 from .services import async_ensure_entity_services_registered
+from .controller import ControlCycleInput
 from .state import LearningEntryPayload, ThermostatMode
 from .storage import LearningStateStore
 from .switches import any_switch_active, async_turn_switches
@@ -340,7 +341,7 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
         solar_sample_forecast = get_solar_sample_forecast(
             self.hass, self._config.lookahead_steps, solar_samples
         )
-        ran = await self._controller.run_control_cycle(
+        cycle_input = ControlCycleInput(
             force=force,
             forecast_temperatures=forecast_temperatures,
             solar=self._controller.current_solar,
@@ -350,6 +351,9 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
             current_switch_active=any_switch_active(
                 self.hass, self._config.switch_entity_ids
             ),
+        )
+        ran = await self._controller.run_control_cycle(
+            cycle_input,
             turn_switches=self._async_turn_all_switches,
             persist=self._async_persist_learning_state_payload,
         )
