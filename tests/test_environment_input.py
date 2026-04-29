@@ -5,10 +5,10 @@ from __future__ import annotations
 import pytest
 
 from custom_components.learning_thermostat.config_contract import ThermostatConfig
-from custom_components.learning_thermostat.environment import DetectedSolarEntities
 from custom_components.learning_thermostat.environment_input import (
     EnvironmentInputCollector,
 )
+from custom_components.learning_thermostat.solar_input import DetectedSolarEntities
 
 pytestmark = pytest.mark.asyncio
 

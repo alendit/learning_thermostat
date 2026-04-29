@@ -9,15 +9,17 @@ from homeassistant.core import HomeAssistant, State
 
 from .config_contract import ThermostatConfig
 from .controller import ControlCycleInput
-from .environment import (
+from .solar_input import (
     DetectedSolarEntities,
-    async_get_forecast_temperatures,
     build_current_solar_sample,
+    get_solar_forecast_samples,
+    get_solar_sample_forecast,
+)
+from .weather_input import (
+    async_get_forecast_temperatures,
     coerce_outdoor_temperature,
     coerce_state_temperature,
     forecast_entity_id,
-    get_solar_forecast_samples,
-    get_solar_sample_forecast,
 )
 from .switches import any_switch_active
 

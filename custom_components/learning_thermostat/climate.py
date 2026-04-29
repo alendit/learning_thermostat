@@ -35,11 +35,11 @@ from .const import (
     DOMAIN,
     NAME,
 )
-from .environment import (
+from .solar_input import (
     DetectedSolarEntities,
-    coerce_float,
     detect_pirate_weather_solar_entities,
 )
+from .weather_input import coerce_float
 from .environment_input import CurrentEnvironmentInput, EnvironmentInputCollector
 from .runtime import LearningThermostatRuntime, async_get_or_create_runtime
 from .services import async_ensure_entity_services_registered
