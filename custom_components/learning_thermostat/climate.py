@@ -37,19 +37,12 @@ from .const import (
 )
 from .environment import (
     DetectedSolarEntities,
-    async_get_forecast_temperatures,
-    build_current_solar_sample,
     coerce_float,
-    coerce_outdoor_temperature,
-    coerce_state_temperature,
     detect_pirate_weather_solar_entities,
-    forecast_entity_id,
-    get_solar_forecast_samples,
-    get_solar_sample_forecast,
 )
+from .environment_input import CurrentEnvironmentInput, EnvironmentInputCollector
 from .runtime import LearningThermostatRuntime, async_get_or_create_runtime
 from .services import async_ensure_entity_services_registered
-from .controller import ControlCycleInput
 from .state import LearningEntryPayload, ThermostatMode
 from .storage import LearningStateStore
 from .switches import any_switch_active, async_turn_switches
@@ -92,6 +85,7 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
         )
         self._config = self._runtime.config
         self._controller = self._runtime.controller
+        self._input_collector = EnvironmentInputCollector(hass, self._config)
         self._attr_name = self._name
         self._attr_unique_id = entry.entry_id
         self._attr_should_poll = False
@@ -253,7 +247,9 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
     ) -> None:
         """Update the room temperature from a state event."""
         self._controller.update_current_temperature(
-            coerce_state_temperature(event.data.get("new_state"))
+            self._input_collector.current_temperature_from_state(
+                event.data.get("new_state")
+            )
         )
         self.async_write_ha_state()
 
@@ -263,7 +259,9 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
     ) -> None:
         """Update the outdoor temperature from a state event."""
         self._controller.update_outside_temperature(
-            coerce_outdoor_temperature(event.data.get("new_state"))
+            self._input_collector.outdoor_temperature_from_state(
+                event.data.get("new_state")
+            )
         )
         self.async_write_ha_state()
 
@@ -272,10 +270,10 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
         self, event: Event[EventStateChangedData]
     ) -> None:
         """Update the solar intensity from a state event."""
-        solar = coerce_state_temperature(event.data.get("new_state"))
-        self._controller.update_current_solar(
-            solar, build_current_solar_sample(self.hass, solar)
+        solar, sample = self._input_collector.solar_from_state(
+            event.data.get("new_state")
         )
+        self._controller.update_current_solar(solar, sample)
         self.async_write_ha_state()
 
     @callback
@@ -291,25 +289,15 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
 
     async def _async_refresh_temperature_inputs(self) -> None:
         """Load current sensor values from the state machine."""
-        self._controller.update_current_temperature(
-            coerce_state_temperature(
-                self.hass.states.get(self._config.temperature_sensor_entity_id)
-            )
+        self._apply_current_environment(
+            self._input_collector.current_environment(self._detected_solar)
         )
-        if self._config.outdoor_entity_id:
-            self._controller.update_outside_temperature(
-                coerce_outdoor_temperature(
-                    self.hass.states.get(self._config.outdoor_entity_id)
-                )
-            )
-        solar = coerce_state_temperature(
-            self.hass.states.get(self._detected_solar.current_entity_id)
-            if self._detected_solar.current_entity_id
-            else None
-        )
-        self._controller.update_current_solar(
-            solar, build_current_solar_sample(self.hass, solar)
-        )
+
+    def _apply_current_environment(self, current: CurrentEnvironmentInput) -> None:
+        """Apply collected environmental inputs to the controller."""
+        self._controller.update_current_temperature(current.current_temperature)
+        self._controller.update_outside_temperature(current.outside_temperature)
+        self._controller.update_current_solar(current.solar, current.solar_sample)
 
     async def _async_restore_runtime_state(self) -> None:
         """Restore the HA and learning state from storage."""
@@ -330,27 +318,12 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
 
     async def _async_run_control_cycle(self, force: bool) -> bool:
         """Run one thermostat control cycle."""
-        await self._async_refresh_temperature_inputs()
-        forecast_temperatures = await async_get_forecast_temperatures(
-            self.hass, self._forecast_entity_id, self._config.lookahead_steps
-        )
-        solar_samples = get_solar_forecast_samples(
-            self.hass, self._detected_solar, self._config.lookahead_steps
-        )
-        solar_forecast = [solar for _hour, solar in solar_samples]
-        solar_sample_forecast = get_solar_sample_forecast(
-            self.hass, self._config.lookahead_steps, solar_samples
-        )
-        cycle_input = ControlCycleInput(
+        current = self._input_collector.current_environment(self._detected_solar)
+        self._apply_current_environment(current)
+        cycle_input = await self._input_collector.async_control_cycle_input(
             force=force,
-            forecast_temperatures=forecast_temperatures,
-            solar=self._controller.current_solar,
-            solar_forecast=solar_forecast,
-            solar_sample=self._controller.current_solar_sample,
-            solar_sample_forecast=solar_sample_forecast,
-            current_switch_active=any_switch_active(
-                self.hass, self._config.switch_entity_ids
-            ),
+            detected_solar=self._detected_solar,
+            current=current,
         )
         ran = await self._controller.run_control_cycle(
             cycle_input,
@@ -376,14 +349,6 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
     async def _async_turn_all_switches(self, turn_on: bool) -> None:
         """Turn all configured switch entities on or off."""
         await async_turn_switches(self.hass, self._config.switch_entity_ids, turn_on)
-
-    @property
-    def _forecast_entity_id(self) -> str | None:
-        """Return the best forecast source for the configured outdoor input."""
-        return forecast_entity_id(
-            self._config.outdoor_entity_id,
-            self._config.legacy_forecast_entity_id,
-        )
 
 
 def _to_thermostat_mode(hvac_mode: HVACMode) -> ThermostatMode:
