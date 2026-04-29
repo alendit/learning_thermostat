@@ -27,7 +27,7 @@ from .const import (
     LEARNING_MODEL_LABELS,
     LEARNING_MODEL_LINEAR,
 )
-from .optimizer import DEFAULT_LEARNING_SWITCH_CONFIG
+from .learning_defaults import DEFAULT_LEARNING_SWITCH_CONFIG
 
 
 def normalize_config_entry_data(data: dict[str, Any]) -> dict[str, Any]:

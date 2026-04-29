@@ -42,7 +42,7 @@ from .const import (
     LEARNING_MODEL_LABELS,
 )
 from .config_contract import normalize_config_entry_data
-from .optimizer import DEFAULT_LEARNING_SWITCH_CONFIG
+from .learning_defaults import DEFAULT_LEARNING_SWITCH_CONFIG
 
 
 def _entry_unique_id(data: dict[str, Any]) -> str:

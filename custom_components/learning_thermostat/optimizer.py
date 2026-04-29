@@ -23,11 +23,8 @@ import time
 from typing import Any
 import numpy as np
 
-from .const import (
-    DEFAULT_LEARNING_MODEL,
-    LEARNING_MODEL_LINEAR,
-    LEARNING_MODEL_PHYSICAL,
-)
+from .const import LEARNING_MODEL_LINEAR, LEARNING_MODEL_PHYSICAL
+from .learning_defaults import DEFAULT_LEARNING_SWITCH_CONFIG
 from .optimizer_features import (
     PHYSICAL_HALF_LIFE_MINUTES,
     build_model_feature,
@@ -101,19 +98,6 @@ SOLAR_ORIENTATION_MIN_EXAMPLES = 8
 SOLAR_ORIENTATION_MIN_ACTIVE_EXAMPLES = 4
 SOLAR_ORIENTATION_TRAINING_MAX = 96
 SOLAR_ORIENTATION_IMPROVEMENT_MIN = 0.02
-
-DEFAULT_LEARNING_SWITCH_CONFIG = {
-    "lookahead_steps": 24,
-    "learning_rate": 0.005,
-    "l2_reg": 0.001,
-    "w_energy": 0.01,
-    "history_steps": 12,
-    "history_decay": 1.0,
-    "error_decay": 0.9,
-    "default_u_gain_per_hour": 0.1,
-    "learning_model": DEFAULT_LEARNING_MODEL,
-}
-
 
 _LOGGER = logging.getLogger(__name__)
 

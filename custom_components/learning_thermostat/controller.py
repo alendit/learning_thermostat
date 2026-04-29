@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from .config_contract import ThermostatConfig
-from .optimizer import DEFAULT_LEARNING_SWITCH_CONFIG, LearningSwitchOptimizer
+from .optimizer import LearningSwitchOptimizer
 from .optimizer_orientation import unknown_solar_orientation_diagnostics
 from .optimizer_types import OptimizerTickResult, SolarOrientationDiagnostics
 from .state import LearningEntryPayload, ThermostatMode, build_entry_payload

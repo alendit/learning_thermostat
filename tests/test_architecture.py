@@ -9,6 +9,7 @@ CORE_MODULES = [
     "attributes.py",
     "config_contract.py",
     "controller.py",
+    "learning_defaults.py",
     "optimizer.py",
     "optimizer_features.py",
     "optimizer_history.py",
@@ -66,6 +67,15 @@ def test_home_assistant_imports_stay_in_adapter_modules() -> None:
         if path.name in HA_ADAPTER_MODULES:
             continue
         assert not imports_home_assistant, path.name
+
+
+def test_config_modules_do_not_import_optimizer() -> None:
+    """Config contracts and flows should not depend on optimizer internals."""
+    for module in ("config_contract.py", "config_flow.py"):
+        text = _component_path(module).read_text(encoding="utf-8")
+
+        assert "from .optimizer import" not in text
+        assert "import .optimizer" not in text
 
 
 def _component_path(module: str) -> Path:
