@@ -14,6 +14,7 @@ CORE_MODULES = [
     "optimizer_features.py",
     "optimizer_history.py",
     "optimizer_learning.py",
+    "optimizer_memory.py",
     "optimizer_orientation.py",
     "optimizer_planning.py",
     "optimizer_state.py",
