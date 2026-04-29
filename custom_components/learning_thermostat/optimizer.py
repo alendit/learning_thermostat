@@ -39,6 +39,7 @@ from .optimizer_planning import (
     normalize_solar_forecast,
     predict_next,
     rollout,
+    simulate_schedule,
 )
 from .optimizer_orientation import (
     apply_empirical_solar_gains,
@@ -76,6 +77,7 @@ LEARNING_RATE_TARGET_ERROR = 0.2
 LEARNING_RATE_SCALE_MIN = 0.2
 LEARNING_RATE_SCALE_MAX = 2.0
 U_WEIGHT_MIN = 1e-6
+FORCE_HEAT_UNDERSHOOT_C = 1.5
 SOLAR_ORIENTATION_GRID_DEGREES = 5
 SOLAR_ORIENTATION_MIN_EXAMPLES = 8
 SOLAR_ORIENTATION_MIN_ACTIVE_EXAMPLES = 4
@@ -199,33 +201,42 @@ class LearningSwitchOptimizer:
         )
         if not np.allclose(self._weights, baseline_weights, rtol=0.0, atol=1e-9):
             return False
-        try:
-            minutes = float(step_minutes) if step_minutes is not None else 60.0
-        except (TypeError, ValueError):
-            minutes = 60.0
-        if minutes <= 0:
-            minutes = 60.0
-        delta = self._default_u_gain_per_hour * (minutes / 60.0)
-        if not np.isfinite(delta):
-            return False
         u_index = self._model.u_weight_start(
             history_steps=self._history_steps,
         )
-        if u_index < self._weights.size:
-            if self._model.is_physical:
-                feature_delta = physical_filter_delta(
-                    PHYSICAL_HALF_LIFE_MINUTES[0], minutes
-                )
-                if feature_delta <= 0.0:
-                    return False
-                self._weights[u_index] = float(delta / feature_delta)
-            else:
-                self._weights[u_index] = float(delta)
+        floors = self._minimum_u_weight_floors()
+        if u_index + floors.size <= self._weights.size and floors.size:
+            self._weights[u_index : u_index + floors.size] = floors
             return True
         return False
 
+    def _minimum_u_weight_floors(self) -> np.ndarray:
+        """Return minimum heating weights that preserve physical heat authority."""
+        count = self._model.heat_feature_count(
+            history_steps=self._history_steps,
+        )
+        floors = np.full(count, U_WEIGHT_MIN, dtype=float)
+        try:
+            minutes = float(self._feature_step_minutes or 60.0)
+        except (TypeError, ValueError):
+            minutes = 60.0
+        if minutes <= 0.0:
+            minutes = 60.0
+        delta = self._default_u_gain_per_hour * (minutes / 60.0)
+        if not np.isfinite(delta) or delta <= 0.0:
+            return floors
+        if self._model.is_physical:
+            feature_delta = physical_filter_delta(
+                PHYSICAL_HALF_LIFE_MINUTES[0], minutes
+            )
+            if feature_delta > 0.0:
+                floors[0] = max(floors[0], float(delta / feature_delta))
+        else:
+            floors[0] = max(floors[0], float(delta))
+        return floors
+
     def _cap_u_weights(self) -> bool:
-        """Clamp on/off weights to a small positive minimum."""
+        """Clamp on/off weights to the minimum positive heating authority."""
         start = self._model.u_weight_start(
             history_steps=self._history_steps,
         )
@@ -234,11 +245,11 @@ class LearningSwitchOptimizer:
         )
         if start >= self._weights.size:
             return False
-        floor = U_WEIGHT_MIN
-        if not np.isfinite(floor) or floor <= 0.0:
+        floors = self._minimum_u_weight_floors()
+        if not floors.size or floors.size != end - start:
             return False
         before = self._weights[start:end].copy()
-        self._weights[start:end] = np.maximum(self._weights[start:end], floor)
+        self._weights[start:end] = np.maximum(self._weights[start:end], floors)
         return not np.allclose(before, self._weights[start:end], rtol=0.0, atol=1e-12)
 
     def weight_contributions(self, u_value: int | None = None) -> np.ndarray:
@@ -765,6 +776,21 @@ class LearningSwitchOptimizer:
             t_outs=t_outs,
             solar_forecast=solar_outs,
         )
+        safety_override = None
+        if steps > 0 and start_step != 0 and t_room <= t_set - FORCE_HEAT_UNDERSHOOT_C:
+            start_step = 0
+            stop_step = 1
+            plan_cost, _ = simulate_schedule(
+                **planning_args,
+                error_decay=self._error_decay,
+                w_energy=self._config.get("w_energy", 0.0),
+                t_set=t_set,
+                t_outs=t_outs,
+                solar_forecast=solar_outs,
+                start=start_step,
+                stop=stop_step,
+            )
+            safety_override = "large_undershoot"
         u_planned = 1 if start_step == 0 and stop_step > 0 else 0
         planned_states = [
             1 if start_step <= idx < stop_step else 0 for idx in range(len(t_outs))
@@ -901,6 +927,7 @@ class LearningSwitchOptimizer:
             "lookahead_selected": steps,
             "lookahead_bounds": {"min": min_steps, "max": max_steps},
             "lookahead_reason": decision_reason,
+            "safety_override": safety_override,
             "step_count": self._memory.step_count,
             "weights_reset": weights_reset,
             "solar_orientation": self.solar_orientation_diagnostics(),

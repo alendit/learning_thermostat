@@ -789,6 +789,77 @@ def test_physical_default_heating_seed_matches_existing_cold_start_delta() -> No
     )
 
 
+def test_physical_restored_model_keeps_minimum_heat_authority_when_below_target() -> (
+    None
+):
+    """A restored model must not learn heating down to a no-op below target."""
+    optimizer = LearningSwitchOptimizer(
+        "zone_physical_restored",
+        config={
+            "history_steps": 6,
+            "lookahead_steps": 12,
+            "learning_model": LEARNING_MODEL_PHYSICAL,
+            "default_u_gain_per_hour": 0.1,
+            "learning_rate": 0.0,
+        },
+    )
+    snapshot = optimizer.snapshot_state()
+    weights = list(snapshot["weights"])
+    weights[0] = 0.01
+    weights[6:9] = [0.000001, 0.000001, 0.000001]
+    snapshot["weights"] = weights
+    snapshot["history"]["t_room"] = [21.0] * 6
+    snapshot["history"]["t_out"] = [8.5] * 6
+    snapshot["history"]["u"] = [0] * 6
+    optimizer.restore_state(snapshot)
+
+    result = optimizer.tick(
+        t_room=21.0,
+        t_out=8.5,
+        t_set=22.4,
+        t_out_forecast=[8.5] * 12,
+        current_u=0,
+        step_minutes=24,
+    )
+
+    assert result["t_pred_on"] > result["t_pred_off"]
+    assert result["u_planned"] == 1
+    assert result["safety_override"] is None
+
+
+def test_physical_model_forces_one_heat_cycle_for_large_undershoot() -> None:
+    """A large undershoot should heat even when the model has no useful heat gain."""
+    optimizer = LearningSwitchOptimizer(
+        "zone_physical_undershoot",
+        config={
+            "history_steps": 6,
+            "lookahead_steps": 12,
+            "learning_model": LEARNING_MODEL_PHYSICAL,
+            "default_u_gain_per_hour": 0.0,
+            "learning_rate": 0.0,
+        },
+    )
+    snapshot = optimizer.snapshot_state()
+    snapshot["history"]["t_room"] = [21.0] * 6
+    snapshot["history"]["t_out"] = [8.5] * 6
+    snapshot["history"]["u"] = [0] * 6
+    optimizer.restore_state(snapshot)
+
+    result = optimizer.tick(
+        t_room=21.0,
+        t_out=8.5,
+        t_set=22.5,
+        t_out_forecast=[8.5] * 12,
+        current_u=0,
+        step_minutes=24,
+    )
+
+    assert result["u_planned"] == 1
+    assert result["planned_states"][0] == 1
+    assert result["planned_states"][1:] == [0] * 11
+    assert result["safety_override"] == "large_undershoot"
+
+
 def test_physical_solar_orientation_diagnostics_rank_filter_weights() -> None:
     """Physical diagnostics should sum positive facade weights across half-lives."""
     optimizer = LearningSwitchOptimizer(
