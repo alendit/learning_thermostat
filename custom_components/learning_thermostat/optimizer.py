@@ -23,20 +23,15 @@ import time
 from typing import Any
 import numpy as np
 
-from .const import LEARNING_MODEL_PHYSICAL
 from .learning_defaults import DEFAULT_LEARNING_SWITCH_CONFIG
 from .optimizer_features import (
     PHYSICAL_HALF_LIFE_MINUTES,
-    build_model_feature,
-    default_weights,
-    heat_feature_count,
-    init_weights,
     physical_filter_delta,
-    u_weight_start,
 )
 from .optimizer_history import build_history_arrays, update_latest_first_histories
 from .optimizer_learning import compute_multi_step_update, compute_single_step_update
 from .optimizer_memory import OptimizerLearningMemory
+from .optimizer_model import OptimizerModelComponent
 from .optimizer_planning import (
     effective_solar_orientation,
     find_start_stop,
@@ -131,19 +126,21 @@ class LearningSwitchOptimizer:
         self._learning_model = normalize_learning_model(
             self._config.get("learning_model")
         )
+        self._model = OptimizerModelComponent(
+            learning_model=self._learning_model,
+            use_solar_feature=bool(self._config.get("use_solar_feature")),
+        )
         self._model_schema_version = MODEL_SCHEMA_VERSION
         self._feature_step_minutes = 60.0
 
         # Optional starting weights.
         self._weights_init = self._config.get("weights_init")
         # Whether the model includes a solar irradiance feature channel.
-        self._use_solar_feature = bool(self._config.get("use_solar_feature"))
+        self._use_solar_feature = self._model.use_solar_feature
         # Current model weights, shape: [t_hist, out_hist, (solar_orientation_hist), u_hist, bias].
-        self._weights = init_weights(
+        self._weights = self._model.init_weights(
             self._weights_init,
-            learning_model=self._learning_model,
             history_steps=self._history_steps,
-            use_solar_feature=self._use_solar_feature,
         )
         self._memory = OptimizerLearningMemory()
         self._warned_invalid_weights = False
@@ -184,11 +181,9 @@ class LearningSwitchOptimizer:
         if np.all(np.isfinite(self._weights)):
             self._warned_invalid_weights = False
             return False
-        self._weights = init_weights(
+        self._weights = self._model.init_weights(
             self._weights_init,
-            learning_model=self._learning_model,
             history_steps=self._history_steps,
-            use_solar_feature=self._use_solar_feature,
         )
         if not self._warned_invalid_weights:
             _LOGGER.warning(
@@ -199,10 +194,8 @@ class LearningSwitchOptimizer:
 
     def _apply_default_u_gain(self, step_minutes: int | None) -> bool:
         """Seed a small heating gain so ON predicts a higher next temperature."""
-        baseline_weights = default_weights(
-            learning_model=self._learning_model,
+        baseline_weights = self._model.default_weights(
             history_steps=self._history_steps,
-            use_solar_feature=self._use_solar_feature,
         )
         if not np.allclose(self._weights, baseline_weights, rtol=0.0, atol=1e-9):
             return False
@@ -215,13 +208,11 @@ class LearningSwitchOptimizer:
         delta = self._default_u_gain_per_hour * (minutes / 60.0)
         if not np.isfinite(delta):
             return False
-        u_index = u_weight_start(
-            learning_model=self._learning_model,
+        u_index = self._model.u_weight_start(
             history_steps=self._history_steps,
-            use_solar_feature=self._use_solar_feature,
         )
         if u_index < self._weights.size:
-            if self._learning_model == LEARNING_MODEL_PHYSICAL:
+            if self._model.is_physical:
                 feature_delta = physical_filter_delta(
                     PHYSICAL_HALF_LIFE_MINUTES[0], minutes
                 )
@@ -235,13 +226,10 @@ class LearningSwitchOptimizer:
 
     def _cap_u_weights(self) -> bool:
         """Clamp on/off weights to a small positive minimum."""
-        start = u_weight_start(
-            learning_model=self._learning_model,
+        start = self._model.u_weight_start(
             history_steps=self._history_steps,
-            use_solar_feature=self._use_solar_feature,
         )
-        end = start + heat_feature_count(
-            learning_model=self._learning_model,
+        end = start + self._model.heat_feature_count(
             history_steps=self._history_steps,
         )
         if start >= self._weights.size:
@@ -285,8 +273,7 @@ class LearningSwitchOptimizer:
                     solar_hist[:-1],
                 )
             )
-        x = build_model_feature(
-            learning_model=self._learning_model,
+        x = self._model.build_feature(
             history_decay_vector=self._history_decay_vector,
             feature_step_minutes=self._feature_step_minutes,
             t_hist=t_hist,
@@ -855,12 +842,10 @@ class LearningSwitchOptimizer:
 
         theta_outside = None
         theta_inside = None
-        u_group_index = u_weight_start(
-            learning_model=self._learning_model,
+        u_group_index = self._model.u_weight_start(
             history_steps=self._history_steps,
-            use_solar_feature=self._use_solar_feature,
         )
-        if self._learning_model == LEARNING_MODEL_PHYSICAL:
+        if self._model.is_physical:
             if self._weights.size >= u_group_index + 3:
                 theta_outside = float(self._weights[1])
                 theta_inside = float(self._weights[u_group_index])

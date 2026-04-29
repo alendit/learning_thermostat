@@ -22,6 +22,9 @@ from custom_components.learning_thermostat.optimizer_learning import (
     compute_multi_step_update,
     compute_single_step_update,
 )
+from custom_components.learning_thermostat.optimizer_model import (
+    OptimizerModelComponent,
+)
 from custom_components.learning_thermostat.optimizer_tracking import (
     queue_k_step_baseline,
     queue_k_step_features,
@@ -100,6 +103,28 @@ def test_snapshot_contract_keys_and_model_metadata_for_supported_models() -> Non
         assert snapshot["model_id"] == model_id
         assert snapshot["model_schema_version"] == MODEL_SCHEMA_VERSION
         assert len(snapshot["weights"]) == weight_count
+
+
+def test_model_component_preserves_public_weight_layouts() -> None:
+    """Concrete model components should own stable feature and heat layouts."""
+    cases = [
+        ("linear", False, 19, 12, 6),
+        ("linear", True, 37, 30, 6),
+        (LEARNING_MODEL_PHYSICAL, False, 10, 6, 3),
+        (LEARNING_MODEL_PHYSICAL, True, 19, 15, 3),
+    ]
+
+    for learning_model, use_solar_feature, weight_count, u_start, heat_count in cases:
+        component = OptimizerModelComponent(
+            learning_model=learning_model,
+            use_solar_feature=use_solar_feature,
+        )
+
+        weights = component.init_weights(None, history_steps=6)
+
+        assert len(weights) == weight_count
+        assert component.u_weight_start(history_steps=6) == u_start
+        assert component.heat_feature_count(history_steps=6) == heat_count
 
 
 def test_deterministic_linear_tick_sequence_is_preserved() -> None:
