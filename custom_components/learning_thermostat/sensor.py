@@ -12,6 +12,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .attributes import learning_model_name
 from .const import DOMAIN
 from .runtime import LearningThermostatRuntime, async_get_or_create_runtime
 
@@ -61,7 +62,7 @@ class SolarOrientationSensor(SensorEntity):
                 "orientation_2_contribution_pct"
             ),
             "confidence": diagnostics.get("confidence"),
-            "model": (self._runtime.controller.learning_state or {}).get("model"),
+            "model": learning_model_name(self._runtime.controller.learning_state),
         }
 
     async def async_added_to_hass(self) -> None:

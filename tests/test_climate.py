@@ -12,6 +12,7 @@ from pytest_homeassistant_custom_component.common import (
 from custom_components.learning_thermostat import environment as environment_module
 from custom_components.learning_thermostat.const import (
     CONF_CYCLE_MINUTES,
+    DATA_STORAGE,
     CONF_LEARNING_ENERGY,
     CONF_LEARNING_ERROR_DECAY,
     CONF_LEARNING_HISTORY_STEPS,
@@ -107,7 +108,11 @@ async def test_trigger_tick_turns_on_switches_when_heat_is_needed(hass) -> None:
 
     state = hass.states.get("climate.kitchen_floor")
     assert state is not None
-    assert state.attributes["learning_state"] is not None
+    assert "learning_state" not in state.attributes
+    assert "learning_result" not in state.attributes
+    assert state.attributes["learning_model"] == "Linear"
+    assert state.attributes["learning_model_id"] == "linear"
+    assert state.attributes["learning_plan"]["u_planned"] == 1
 
 
 async def test_entity_services_target_all_learning_thermostat_entries(hass) -> None:
@@ -141,8 +146,8 @@ async def test_entity_services_target_all_learning_thermostat_entries(hass) -> N
     living_state = hass.states.get("climate.living_floor")
     assert kitchen_state is not None
     assert living_state is not None
-    assert kitchen_state.attributes["learning_result"] is None
-    assert living_state.attributes["learning_result"] is not None
+    assert kitchen_state.attributes.get("learning_plan") is None
+    assert living_state.attributes["learning_plan"] is not None
 
 
 async def test_hvac_off_turns_off_switches(hass) -> None:
@@ -205,7 +210,11 @@ async def test_reset_learning_preserves_state_shape(hass) -> None:
 
     state = hass.states.get("climate.kitchen_floor")
     assert state is not None
-    assert "history" in state.attributes["learning_state"]
+    stored = await hass.data[DOMAIN][DATA_STORAGE].async_get_entry(entry.entry_id)
+    assert stored is not None
+    assert stored["learning_state"] is not None
+    assert "history" in stored["learning_state"]
+    assert "learning_state" not in state.attributes
 
 
 async def test_weather_entity_provides_current_and_forecast_outdoor_temperature(
@@ -260,7 +269,7 @@ async def test_weather_entity_provides_current_and_forecast_outdoor_temperature(
     state = hass.states.get("climate.kitchen_floor")
     assert state is not None
     assert state.attributes["outside_temperature"] == 7.0
-    assert state.attributes["learning_result"]["forecast_temps"][:2] == [6.5, 6.0]
+    assert state.attributes["learning_plan"]["forecast_temps"][:2] == [6.5, 6.0]
 
 
 async def test_detect_pirate_weather_solar_entities(hass) -> None:
@@ -463,7 +472,7 @@ async def test_pirate_weather_solar_uses_sun_position_for_samples(
     current_sample = state.attributes["current_solar_sample"]
     assert current_sample == {"flux": 200.0, "azimuth": 180.0, "elevation": 45.0}
     assert state.attributes["solar_orientation_azimuth"] is None
-    forecast_sample = state.attributes["learning_result"]["forecast_solar_samples"][0]
+    forecast_sample = state.attributes["learning_plan"]["forecast_solar_samples"][0]
     assert forecast_sample == {"flux": 100.0, "azimuth": 180.0, "elevation": 45.0}
 
 

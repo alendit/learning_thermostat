@@ -6,6 +6,7 @@ import json
 
 from custom_components.learning_thermostat.attributes import (
     RECORDER_ATTRIBUTE_SAFE_BYTES,
+    build_learning_diagnostic_attributes,
     compact_state_attributes,
 )
 
@@ -134,3 +135,43 @@ def test_compact_state_attributes_fit_recorder_limit_without_dropping_model() ->
     assert "solar_training_examples" not in compacted["learning_state"]
     assert "weights" not in compacted["learning_result"]
     assert "delta" not in compacted["learning_result"]["update"]
+
+
+def test_learning_diagnostics_do_not_expose_raw_optimizer_snapshots() -> None:
+    """HA attributes should expose diagnostics, not the raw persistence payload."""
+    oversized = _oversized_attributes()
+
+    diagnostics = build_learning_diagnostic_attributes(
+        learning_state=oversized["learning_state"],
+        learning_result=oversized["learning_result"],
+        learning_last_tick="2026-04-24T08:18:55+00:00",
+        outside_temperature=9.8,
+        current_solar=378.24,
+        current_solar_sample=oversized["current_solar_sample"],
+        solar_orientation=oversized["learning_state"]["solar_orientation"],
+        on_percent=1.0,
+        underlying_entities=["switch.floor_a"],
+        outdoor_entity_id="weather.home",
+        legacy_forecast_entity_id=None,
+        solar_entity_id="sensor.home_solar",
+        solar_forecast_entity_ids=["sensor.home_solar_1h"],
+    )
+
+    assert "learning_state" not in diagnostics
+    assert "learning_result" not in diagnostics
+    assert diagnostics["learning_model"] == "delta_zscore_solar_orientation"
+    assert diagnostics["learning_last_tick"] == "2026-04-24T08:18:55+00:00"
+    assert diagnostics["learning_plan"]["planned_states"] == [1, 1, 1, 1, 0, 0, 0, 0]
+    assert diagnostics["learning_plan"]["predicted_temps"] == [
+        22.1462,
+        22.1762,
+        22.2062,
+        22.2362,
+        22.2662,
+        22.2962,
+        22.3262,
+        22.3562,
+    ]
+    assert diagnostics["learning_update"]["steps_used"] == 3
+    assert "delta" not in diagnostics["learning_update"]
+    assert _json_size(diagnostics) < RECORDER_ATTRIBUTE_SAFE_BYTES
