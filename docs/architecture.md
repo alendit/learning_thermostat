@@ -8,7 +8,7 @@ user-facing runtime is one Home Assistant `climate` entity per config entry,
 with a diagnostic `sensor` entity for learned solar orientation.
 
 The integration reads room temperature, optional outdoor temperature or weather
-forecast data, optional Pirate Weather solar irradiance data, and the current
+forecast data, optional weather-provider solar irradiance data, and the current
 state of configured `switch` or `input_boolean` entities. It writes only through
 standard Home Assistant `turn_on` and `turn_off` services for those configured
 output entities.
@@ -189,9 +189,9 @@ Home Assistant-facing input collection lives outside the core:
 - `weather_input.py` reads current outdoor temperature from sensors or weather
   attributes and fetches forecast temperatures through Home Assistant weather
   APIs when needed.
-- `solar_input.py` auto-detects Pirate Weather solar sensors linked to the
-  configured weather entity, builds current solar samples from `sun.sun`, and
-  computes forecast sun position with Astral when possible.
+- `solar_input.py` auto-detects supported weather-provider solar irradiance
+  sensors linked to the configured weather entity, builds current solar samples
+  from `sun.sun`, and computes forecast sun position with Astral when possible.
 - `switches.py` reads current output state and applies output decisions through
   Home Assistant services.
 
@@ -408,9 +408,10 @@ Inferred but not yet broad extension points:
 
 - Additional weather providers can fit through `weather_input.py` if they expose
   current and forecast temperature in Home Assistant-supported shapes.
-- Additional solar providers would need adapter work comparable to
-  `solar_input.py`; the core solar feature and optimizer contracts are already
-  provider-neutral.
+- Solar providers must expose average irradiance in `W/m²` at the adapter
+  boundary. Pirate Weather provides that shape directly. Bright Sky support uses
+  only the derived `solar_irradiance_*` sensors and intentionally ignores raw
+  Bright Sky `solar_*` interval irradiation values in `kWh/m²`.
 - Additional thermostat device classes are not an intended extension point
   under the current product boundaries.
 

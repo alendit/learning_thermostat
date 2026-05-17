@@ -31,7 +31,8 @@ The first version intentionally supports only:
 - room temperature sensor input
 - optional outdoor source via temperature sensor or weather entity
 - weather entities supply both current outdoor temperature and forecast temperatures
-- optional auto-detected solar input when the selected weather provider exposes linked irradiance sensors
+- optional auto-detected solar input when the selected weather provider exposes
+  linked irradiance sensors in `W/m²`
 - persistent learning weights and migration from `versatile_thermostat`
 
 It intentionally does not include translation support, inverse switch behavior,
@@ -59,6 +60,17 @@ Climate attributes expose compact diagnostics instead:
 
 This keeps the recorder attribute payload small while preserving full learning
 state in the integration storage file.
+
+## Weather And Solar Providers
+
+Weather entities can provide current outdoor temperature and forecast
+temperatures through Home Assistant's weather APIs. Pirate Weather and Bright
+Sky can also provide solar-aware learning when their linked sensor entities
+expose solar irradiance in `W/m²`.
+
+For Bright Sky, use the derived `solar_irradiance_*` sensors from the Bright
+Sky integration. The raw Bright Sky `solar_*` sensors are interval irradiation
+values in `kWh/m²` and are intentionally not consumed by this thermostat.
 
 ## Migration
 

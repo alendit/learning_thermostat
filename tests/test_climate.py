@@ -386,6 +386,73 @@ async def test_detect_pirate_weather_live_entity_names(hass) -> None:
     ]
 
 
+async def test_detect_brightsky_solar_irradiance_entities(hass) -> None:
+    """Bright Sky detection should use only derived W/m² irradiance sensors."""
+    brightsky_entry = MockConfigEntry(domain="brightsky", title="Bright Sky")
+    brightsky_entry.add_to_hass(hass)
+
+    registry = er.async_get(hass)
+    weather_entry = registry.async_get_or_create(
+        "weather",
+        "brightsky",
+        "bright-sky-weather",
+        config_entry=brightsky_entry,
+        object_id_base="bright_sky",
+        original_name="Bright Sky",
+    )
+    registry.async_get_or_create(
+        "sensor",
+        "brightsky",
+        "bright-sky-current-raw",
+        config_entry=brightsky_entry,
+        object_id_base="bright_sky_solar_60",
+        original_name="Bright Sky Solar 60 min",
+        translation_key="solar_60",
+    )
+    registry.async_get_or_create(
+        "sensor",
+        "brightsky",
+        "bright-sky-current-irradiance",
+        config_entry=brightsky_entry,
+        object_id_base="bright_sky_solar_irradiance_60",
+        original_name="Bright Sky Solar irradiance 60 min",
+        translation_key="solar_irradiance_60",
+    )
+    registry.async_get_or_create(
+        "sensor",
+        "brightsky",
+        "bright-sky-hourly-raw",
+        config_entry=brightsky_entry,
+        object_id_base="bright_sky_next_hour_solar",
+        original_name="Bright Sky Next hour solar",
+    )
+    registry.async_get_or_create(
+        "sensor",
+        "brightsky",
+        "bright-sky-hourly-1",
+        config_entry=brightsky_entry,
+        object_id_base="bright_sky_next_hour_solar_irradiance",
+        original_name="Bright Sky Next hour solar irradiance",
+    )
+    registry.async_get_or_create(
+        "sensor",
+        "brightsky",
+        "bright-sky-hourly-2",
+        config_entry=brightsky_entry,
+        object_id_base="bright_sky_hourly_2h_solar_irradiance",
+        original_name="Bright Sky Hourly +2h solar irradiance",
+    )
+
+    detected = solar_input.detect_weather_solar_entities(hass, weather_entry.entity_id)
+
+    assert detected.current_entity_id == "sensor.bright_sky_solar_irradiance_60"
+    assert list(detected.forecast_entity_ids) == [
+        "sensor.bright_sky_next_hour_solar_irradiance",
+        "sensor.bright_sky_hourly_2h_solar_irradiance",
+    ]
+    assert detected.forecast_hours == (1, 2)
+
+
 async def test_pirate_weather_solar_uses_sun_position_for_samples(
     hass, monkeypatch
 ) -> None:
@@ -472,6 +539,113 @@ async def test_pirate_weather_solar_uses_sun_position_for_samples(
     assert state.attributes["solar_orientation_azimuth"] is None
     forecast_sample = state.attributes["learning_plan"]["forecast_solar_samples"][0]
     assert forecast_sample == {"flux": 100.0, "azimuth": 180.0, "elevation": 45.0}
+
+
+async def test_brightsky_solar_uses_irradiance_entities_for_samples(
+    hass, monkeypatch
+) -> None:
+    """Bright Sky should provide weather forecasts and W/m² solar samples."""
+    brightsky_entry = MockConfigEntry(domain="brightsky", title="Bright Sky")
+    brightsky_entry.add_to_hass(hass)
+
+    registry = er.async_get(hass)
+    registry.async_get_or_create(
+        "weather",
+        "brightsky",
+        "bright-sky-weather-profile",
+        config_entry=brightsky_entry,
+        object_id_base="bright_sky",
+        original_name="Bright Sky",
+    )
+    registry.async_get_or_create(
+        "sensor",
+        "brightsky",
+        "bright-sky-current-profile",
+        config_entry=brightsky_entry,
+        object_id_base="bright_sky_solar_irradiance_60",
+        original_name="Bright Sky Solar irradiance 60 min",
+        translation_key="solar_irradiance_60",
+    )
+    registry.async_get_or_create(
+        "sensor",
+        "brightsky",
+        "bright-sky-hourly-current-profile",
+        config_entry=brightsky_entry,
+        object_id_base="bright_sky_current_hour_solar_irradiance",
+        original_name="Bright Sky Current hour solar irradiance",
+    )
+    registry.async_get_or_create(
+        "sensor",
+        "brightsky",
+        "bright-sky-hourly-1-profile",
+        config_entry=brightsky_entry,
+        object_id_base="bright_sky_next_hour_solar_irradiance",
+        original_name="Bright Sky Next hour solar irradiance",
+    )
+
+    hass.states.async_set("sensor.kitchen_temperature", "18.0")
+    hass.states.async_set("weather.bright_sky", "sunny", {"temperature": 7.0})
+    hass.states.async_set("switch.floor_a", "off")
+    hass.states.async_set("switch.floor_b", "off")
+    hass.states.async_set(
+        "sun.sun",
+        "above_horizon",
+        {"azimuth": 180.0, "elevation": 45.0},
+    )
+    hass.states.async_set("sensor.bright_sky_solar_irradiance_60", "536.0")
+    hass.states.async_set("sensor.bright_sky_current_hour_solar_irradiance", "500.0")
+    hass.states.async_set("sensor.bright_sky_next_hour_solar_irradiance", "656.0")
+    async_mock_service(hass, "switch", "turn_on")
+    async_mock_service(hass, "switch", "turn_off")
+
+    async def fake_weather_forecast(_hass, _entity_id, _forecast_type="hourly"):
+        return {
+            "forecast": [
+                {"temperature": 6.5},
+                {"temperature": 6.0},
+            ]
+        }
+
+    monkeypatch.setattr(
+        weather_input, "async_weather_get_forecast", fake_weather_forecast
+    )
+    monkeypatch.setattr(
+        solar_input,
+        "solar_position_at",
+        lambda _hass, _when: solar_input.SunPosition(azimuth=180.0, elevation=45.0),
+    )
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Kitchen Floor",
+        data={
+            **_entry().data,
+            CONF_OUTDOOR_ENTITY_ID: "weather.bright_sky",
+        },
+    )
+    entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    await hass.services.async_call(
+        DOMAIN,
+        SERVICE_TRIGGER_TICK,
+        {"entity_id": "climate.kitchen_floor", "force": True},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+
+    state = hass.states.get("climate.kitchen_floor")
+    assert state is not None
+    assert state.attributes["outside_temperature"] == 7.0
+    assert state.attributes["learning_plan"]["forecast_temps"][:2] == [6.5, 6.0]
+    assert state.attributes["current_solar_sample"] == {
+        "flux": 536.0,
+        "azimuth": 180.0,
+        "elevation": 45.0,
+    }
+    forecast_sample = state.attributes["learning_plan"]["forecast_solar_samples"][0]
+    assert forecast_sample == {"flux": 656.0, "azimuth": 180.0, "elevation": 45.0}
 
 
 async def test_solar_orientation_diagnostic_sensor_updates_after_tick(hass) -> None:

@@ -37,7 +37,7 @@ from .const import (
 )
 from .solar_input import (
     DetectedSolarEntities,
-    detect_pirate_weather_solar_entities,
+    detect_weather_solar_entities,
 )
 from .weather_input import coerce_float
 from .environment_input import CurrentEnvironmentInput, EnvironmentInputCollector
@@ -160,7 +160,7 @@ class LearningThermostatEntity(ClimateEntity, RestoreEntity):
         """Register listeners and restore state."""
         await super().async_added_to_hass()
         await self._async_restore_runtime_state()
-        self._detected_solar = detect_pirate_weather_solar_entities(
+        self._detected_solar = detect_weather_solar_entities(
             self.hass, self._config.outdoor_entity_id
         )
         self._controller.set_solar_available(
